@@ -1,0 +1,16 @@
+# Session notes
+handoff.md
+todo.md
+.claude/
+
+# Project-specific: never let a secret land in this repo by accident.
+# The local config file and any GitHub App key should live outside the
+# repo entirely (e.g. ~/.runpod-lab/), but these patterns are a backstop
+# in case one gets dropped in here during testing.
+*.pem
+*.key
+.env
+.env.*
+last-session
+runpod-lab.config
+*.log
