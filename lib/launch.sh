@@ -141,14 +141,7 @@ ensure_network_volume() {
 
   log_info "Creating volume (billed for as long as it exists, independent of" \
            "whether a pod is attached - see README for the rate)."
-  # Raw output shown as-is and the ID pasted back, same as the setup
-  # wizard's setup_network_volume() - not parsed automatically since the
-  # exact create-response shape hasn't been confirmed against a live call.
-  runpodctl network-volume create --name "$vol_name" --size "$vol_size" --data-center-id "$DATACENTER_ID" \
-    || die "Volume creation failed."
-  echo
-  read -r -p "Paste the new network volume ID shown above: " NETWORK_VOLUME_ID
-  [[ -n "$NETWORK_VOLUME_ID" ]] || die "No volume ID entered."
+  create_network_volume "$vol_name" "$vol_size"
 
   sed -i "s|^NETWORK_VOLUME_ID=.*|NETWORK_VOLUME_ID=$NETWORK_VOLUME_ID|" "$CONFIG_FILE"
   log_ok "Saved new NETWORK_VOLUME_ID to $CONFIG_FILE."
@@ -184,14 +177,15 @@ create_pod() {
     --name "runpod-lab-$(date +%s)" \
     --env "$env_json")" || die "Pod creation failed. Raw output:\n$create_output"
 
-  log_info "$create_output"
-  # Pod-ID extraction from output isn't parsed here (format unconfirmed) -
-  # instead we list pods and let the user confirm which one just came up,
-  # since RUNPOD_POD_ID only becomes reliably knowable from *inside* the pod.
-  echo
-  runpodctl pod list || true
-  read -r -p "Paste the pod ID shown above for the pod that was just created: " POD_ID
-  [[ -n "$POD_ID" ]] || die "No pod ID entered."
+  # Picking specific fields (rather than printing $create_output raw) is
+  # deliberate: the response's "env" array echoes back RUNPOD_API_KEY and
+  # CLOUDFLARE_TUNNEL_TOKEN in plaintext, which has no business hitting the
+  # terminal or a captured log.
+  POD_ID="$(jq -r '.id // empty' <<< "$create_output")"
+  [[ -n "$POD_ID" ]] || die "Pod created but no id found in the response: $create_output"
+
+  log_ok "Pod created:"
+  jq -r '"  ID:     \(.id)\n  Name:   \(.name)\n  GPU:    \(.machine.gpuDisplayName) x\(.gpuCount)\n  Cost:   $\(.costPerHr)/hr\n  Status: \(.desiredStatus)"' <<< "$create_output"
 }
 
 # --- wait for the pod to actually be reachable ------------------------------

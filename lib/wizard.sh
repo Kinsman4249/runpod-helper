@@ -94,12 +94,7 @@ setup_runpod_api_key() {
   # The CLI's own --help now points at exporting RUNPOD_API_KEY instead, so
   # we do that and let every later runpodctl call in this script pick it up.
   export RUNPOD_API_KEY="$api_key"
-  # Live validation call - confirmed to exist (runpodctl user / alias me),
-  # exact output shape wasn't independently confirmed, so we only check
-  # exit status here, not parse the output.
-  if ! runpodctl user >/dev/null 2>&1; then
-    die "RUNPOD_API_KEY set but a live call (runpodctl user) failed. Double check the key is valid and active."
-  fi
+  validate_runpod_api_key
   log_ok "RunPod API key validated."
 }
 
@@ -167,11 +162,11 @@ setup_network_volume() {
            "single fp16 model, 150-200GB to keep both presets or an fp16 +" \
            "quantized copy side by side. See PREREQUISITES.md for the table."
 
-  # Only the two fields *before* the (billed, non-undoable) create call get
+  # The two fields before the (billed, non-undoable) create call get
   # back-out: name/size navigate between each other locally, and backing out
-  # of name (the first field) hands control to the previous wizard step. The
-  # ID paste after creation stays a plain read - the volume already exists
-  # by then, so "going back" wouldn't undo anything real.
+  # of name (the first field) hands control to the previous wizard step.
+  # There's no back-out after that - the volume already exists by then, so
+  # "going back" wouldn't undo anything real.
   local vol_name vol_size field="name"
   while true; do
     case "$field" in
@@ -189,11 +184,7 @@ setup_network_volume() {
 
   log_info "Creating volume (this is a billed resource for as long as it exists," \
            "independent of whether a pod is attached - see README for the rate)."
-  runpodctl network-volume create --name "$vol_name" --size "$vol_size" --data-center-id "$DATACENTER_ID" \
-    || die "Volume creation failed."
-  echo
-  read -r -p "Paste the network volume ID shown above: " NETWORK_VOLUME_ID
-  [[ -n "$NETWORK_VOLUME_ID" ]] || die "No volume ID entered."
+  create_network_volume "$vol_name" "$vol_size"
 }
 
 # --- step 6: GitHub App -----------------------------------------------------
@@ -327,10 +318,8 @@ setup_cloudflare_tunnel() {
         ;;
       token)
         prompt_text "Paste the tunnel token ($TEXT_BACK_WORD for hostname): " CLOUDFLARE_TUNNEL_TOKEN -s || { field="hostname"; continue; }
-        # No cloudflared subcommand exists to validate a token's shape
-        # (confirmed absent from current docs) - non-empty is the only
-        # check available.
         [[ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]] || die "No tunnel token entered."
+        validate_cloudflare_tunnel_token
         break
         ;;
     esac
@@ -410,6 +399,39 @@ EOF
   chmod 600 "$CONFIG_FILE"
   # Confirm by presence/length only - never echo the values themselves.
   log_ok "Saved config to $CONFIG_FILE ($(wc -l < "$CONFIG_FILE") lines, mode $(stat -c %a "$CONFIG_FILE"))."
+}
+
+# --- --rotate: quick credential refresh --------------------------------------
+
+# Re-prompts for just the two credentials that actually expire/rotate outside
+# this repo (RunPod API key, Cloudflare tunnel token), instead of re-running
+# the whole wizard (SSH key, GitHub App, etc. don't need touching for that).
+# Requires the rest of the config to already be sourced by the caller.
+rotate_credentials() {
+  log_info "Rotating credentials in $CONFIG_FILE. Leave a prompt blank to keep the current value."
+
+  log_info ""
+  log_info "== RunPod API key =="
+  log_info "Generate one at https://www.runpod.io/console/user/settings (Settings > API Keys) if you need a new one."
+  local new_api_key
+  prompt_text "Paste a new RunPod API key (blank to keep the current one): " new_api_key -s
+  if [[ -n "$new_api_key" ]]; then
+    export RUNPOD_API_KEY="$new_api_key"
+    validate_runpod_api_key
+    log_ok "RunPod API key validated."
+  fi
+
+  log_info ""
+  log_info "== Cloudflare tunnel token =="
+  log_info "Find it on the tunnel's Overview page (Cloudflare dashboard) under 'Install and run a connector'."
+  local new_tunnel_token
+  prompt_text "Paste a new tunnel token (blank to keep the current one): " new_tunnel_token -s
+  if [[ -n "$new_tunnel_token" ]]; then
+    CLOUDFLARE_TUNNEL_TOKEN="$new_tunnel_token"
+    validate_cloudflare_tunnel_token
+  fi
+
+  write_config
 }
 
 # --- entry point -------------------------------------------------------------

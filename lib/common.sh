@@ -69,6 +69,74 @@ prompt_text() {
   printf -v "$result_var" '%s' "$reply"
 }
 
+# Creates a network volume and sets NETWORK_VOLUME_ID from the response - no
+# manual copy-paste, since the id is right there in the JSON runpodctl already
+# returns. Prints a short human-readable summary instead of the raw JSON.
+# Usage: create_network_volume vol_name vol_size
+create_network_volume() {
+  local vol_name="$1" vol_size="$2"
+  local create_json
+  create_json="$(runpodctl network-volume create --name "$vol_name" --size "$vol_size" --data-center-id "$DATACENTER_ID")" \
+    || die "Volume creation failed."
+
+  NETWORK_VOLUME_ID="$(jq -r '.id // empty' <<< "$create_json")"
+  [[ -n "$NETWORK_VOLUME_ID" ]] || die "Volume created but no id found in the response: $create_json"
+
+  log_ok "Volume created:"
+  jq -r '"  ID:         \(.id)\n  Name:       \(.name)\n  Size:       \(.size) GB\n  Datacenter: \(.dataCenterId)"' <<< "$create_json"
+}
+
+# --- credential validation ---------------------------------------------------
+# Both checks below exist so a key/token rotated or revoked outside this repo
+# (e.g. in the RunPod or Cloudflare dashboard) fails fast with a clear message
+# - at wizard setup, at the start of every normal launch, and from --rotate -
+# instead of surfacing later as a confusing runpodctl/cloudflared error, or on
+# the pod after a billed create_pod call already ran.
+
+# Live validation call - confirmed to exist (runpodctl user / alias me), exact
+# output shape wasn't independently confirmed, so we only check exit status.
+validate_runpod_api_key() {
+  runpodctl user >/dev/null 2>&1 \
+    || die "RUNPOD_API_KEY was rejected. Double check it's valid and active, or run 'startup.sh --rotate' to paste a fresh one."
+}
+
+# No cloudflared subcommand validates a token without actually connecting, so
+# this briefly runs `cloudflared tunnel run` and watches its log for the
+# success line ("Registered tunnel connection") or the rejection line
+# ("Unauthorized: ..."), then tears the connection down either way. Log
+# strings confirmed via Cloudflare's troubleshooting docs and community
+# reports of revoked-token errors (docs.cloudflare.com/cloudflare-one/
+# networks/connectors/cloudflare-tunnel/troubleshoot-tunnels/common-errors/).
+validate_cloudflare_tunnel_token() {
+  require_cmd cloudflared
+  local logfile
+  logfile="$(mktemp)"
+  cloudflared tunnel run --token "$CLOUDFLARE_TUNNEL_TOKEN" --loglevel info --logfile "$logfile" \
+    >/dev/null 2>&1 &
+  local cf_pid=$!
+
+  local waited=0 max_wait=15 result="timeout"
+  while (( waited < max_wait )); do
+    if grep -q "Registered tunnel connection" "$logfile" 2>/dev/null; then
+      result="ok"; break
+    fi
+    if grep -qi "Unauthorized" "$logfile" 2>/dev/null; then
+      result="rejected"; break
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+
+  kill "$cf_pid" 2>/dev/null
+  wait "$cf_pid" 2>/dev/null
+  rm -f "$logfile"
+
+  case "$result" in
+    ok)       log_ok "Cloudflare tunnel token validated." ;;
+    rejected) die "CLOUDFLARE_TUNNEL_TOKEN was rejected (rotated/revoked?). Run 'startup.sh --rotate' to paste a fresh one." ;;
+    timeout)  die "Could not confirm the Cloudflare tunnel token within ${max_wait}s - check network connectivity, or run 'startup.sh --rotate' to paste a fresh one." ;;
+  esac
+}
+
 # Runs an ordered list of step functions (each named in the $1 array),
 # letting any step "go back" by returning 1 - the runner then re-invokes the
 # previous step instead of advancing. Steps are responsible for their own
