@@ -2,6 +2,12 @@
 
 ## Change history
 
+### 0.6.0 - Credential validation and automated pod/volume creation
+
+1. Added automated credential validation for RunPod API key and Cloudflare tunnel token: new `validate_runpod_api_key()` and `validate_cloudflare_tunnel_token()` functions run at wizard setup and before normal launch, catching rotated/revoked credentials before any billed operations (network volume or pod creation) occur. Cloudflare validation briefly runs the tunnel connector and watches the log for success or rejection signatures rather than simply checking shape, making it robust to future API changes.
+2. Automated pod creation and network volume creation: replaced manual copy-paste workflows for pod IDs and volume IDs with automatic JSON response parsing using `jq`, eliminating user input errors and reducing friction. The `create_network_volume()` helper extracts volume ID from the response and prints a formatted summary; pod creation extraction filters out the response's `env` array to prevent credentials from being logged to the terminal.
+3. Added `--rotate` flag to `startup.sh` and a new `rotate_credentials()` function to re-authenticate RunPod API key and Cloudflare tunnel token without re-running the entire setup wizard, useful when credentials rotate outside this repo (e.g. via the RunPod or Cloudflare dashboard). Early validation in the normal launch flow ensures rotated credentials are caught immediately instead of failing at pod/volume creation time.
+
 ### 0.5.0 - Pod image and multi-frontend support
 
 1. Added the complete pod image (`image/Dockerfile`) replacing the placeholder RunPod base image: builds on `ghcr.io/ggml-org/llama.cpp:server-cuda` (which ships a pre-compiled CUDA-accelerated llama-server), adds OpenHands, llama.cpp's built-in web UI, and Open WebUI as three mutually exclusive frontend options, plus `gh` CLI and `cloudflared` for SSH tunneling and idle detection. Image is built by `../.github/workflows/build-image.yml` and published to `ghcr.io/kinsman4249/runpod-helper-image:latest` on every push to `image/**`.
