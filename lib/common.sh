@@ -44,3 +44,27 @@ confirm() {
   read -r -p "$prompt [y/N] " reply
   [[ "$reply" =~ ^[Yy]$ ]]
 }
+
+# Numbered-menu prompt shared by every "pick one of these" spot (preset,
+# GPU, datacenter) so they all look and behave the same instead of each
+# hand-rolling its own read/case. Prints the options, loops until a valid
+# number is entered, and writes that 1-based index into $2 (the caller maps
+# it back to whatever value array it cares about).
+# Usage: select_from_menu "Choose a preset" result_var "label one" "label two" ...
+select_from_menu() {
+  local prompt="$1" result_var="$2"
+  shift 2
+  local -a labels=("$@")
+  local n=${#labels[@]}
+  local i
+  for (( i = 0; i < n; i++ )); do
+    log_info "  $((i + 1))) ${labels[$i]}"
+  done
+  local choice
+  while true; do
+    read -r -p "$prompt (1-$n): " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )) && break
+    log_warn "Enter a number between 1 and $n."
+  done
+  printf -v "$result_var" '%s' "$choice"
+}

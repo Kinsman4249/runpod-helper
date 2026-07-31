@@ -26,28 +26,52 @@ pick_preset_and_gpu() {
 
   log_info ""
   log_info "Model preset:"
-  log_info "  1) qwen36-27b       - dense model, runs on any GPU tier including RTX 4090"
-  log_info "  2) qwen3-coder-next - MoE model, needs 40GB+ VRAM (A6000 / L40S / A100 class)"
-  local choice
-  read -r -p "Choose 1 or 2: " choice
-  case "$choice" in
-    1) MODEL_PRESET="qwen36-27b" ;;
-    2) MODEL_PRESET="qwen3-coder-next" ;;
-    *) die "Enter 1 or 2." ;;
-  esac
+  local -a preset_values=("qwen36-27b" "qwen3-coder-next")
+  local -a preset_labels=(
+    "qwen36-27b       - dense model, runs on any GPU tier including RTX 4090"
+    "qwen3-coder-next - MoE model, needs 40GB+ VRAM (A6000 / L40S / A100 class)"
+  )
+  local preset_choice
+  select_from_menu "Choose a preset" preset_choice "${preset_labels[@]}"
+  MODEL_PRESET="${preset_values[$((preset_choice - 1))]}"
 
   log_info ""
-  log_info "Live GPU availability and on-demand rates for datacenter $DATACENTER_ID:"
-  # Shown raw (exact column/field names for VRAM size weren't independently
-  # confirmed this session) so you can apply the preset's VRAM requirement
-  # yourself rather than trusting an unverified automated filter.
-  runpodctl gpu list || log_warn "Could not list GPUs - check https://www.runpod.io/console/gpu-cloud instead."
-  if [[ "$MODEL_PRESET" == "qwen3-coder-next" ]]; then
-    log_warn "qwen3-coder-next needs 40GB+ VRAM - do not pick an RTX 4090 (24GB) from the list above."
-  fi
-  echo
-  read -r -p "Enter the GPU ID to use: " GPU_ID
-  [[ -n "$GPU_ID" ]] || die "No GPU ID entered."
+  log_info "Fetching live GPU availability for datacenter $DATACENTER_ID..."
+  local gpu_json
+  gpu_json="$(runpodctl gpu list)" || die "Could not list GPUs - check https://www.runpod.io/console/gpu-cloud instead."
+
+  local min_vram=0
+  [[ "$MODEL_PRESET" == "qwen3-coder-next" ]] && min_vram=40
+
+  # Field names (gpuId, displayName, memoryInGb, securePricePerHr,
+  # dataCenterAvailability[].stockStatus) confirmed against live `runpodctl
+  # gpu list` JSON output this session. Filtering to the target datacenter
+  # and the preset's VRAM floor here means a bad pick is no longer possible,
+  # instead of just being warned about.
+  local menu_rows
+  menu_rows="$(jq -r --arg dc "$DATACENTER_ID" --argjson minvram "$min_vram" '
+    .[]
+    | . as $g
+    | ($g.dataCenterAvailability[]? | select(.dataCenterId == $dc) | .stockStatus) as $stock
+    | select($stock != "none")
+    | select($g.memoryInGb >= $minvram)
+    | [$g.gpuId, $g.displayName, ($g.memoryInGb | tostring), ($g.securePricePerHr | tostring), $stock]
+    | @tsv
+  ' <<< "$gpu_json" | sort -t $'\t' -k4 -n)"
+
+  [[ -n "$menu_rows" ]] || die "No GPUs meeting the ${min_vram}GB+ VRAM requirement are currently available in datacenter $DATACENTER_ID. Check https://www.runpod.io/console/gpu-cloud."
+
+  local -a gpu_ids=() gpu_labels=()
+  while IFS=$'\t' read -r gid dname vram price stock; do
+    gpu_ids+=("$gid")
+    gpu_labels+=("$(printf '%-20s %5sGB  $%s/hr  [%s]' "$dname" "$vram" "$price" "$stock")")
+  done <<< "$menu_rows"
+
+  log_info ""
+  log_info "Available GPUs in $DATACENTER_ID (secure cloud \$/hr):"
+  local gpu_choice
+  select_from_menu "Choose a GPU" gpu_choice "${gpu_labels[@]}"
+  GPU_ID="${gpu_ids[$((gpu_choice - 1))]}"
 
   mkdir -p "$CONFIG_DIR"
   ( umask 077

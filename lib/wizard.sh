@@ -131,13 +131,32 @@ setup_datacenter() {
   log_info "datacenter you pick here, which in turn limits which GPUs you can"
   log_info "use later (not every datacenter stocks every card)."
   log_info ""
-  log_info "Current datacenter / GPU availability:"
-  # Raw output shown as-is (exact column format wasn't independently
-  # confirmed this session) rather than parsed and possibly misread.
-  runpodctl datacenter list || log_warn "Could not list datacenters (command failed) - check availability at https://www.runpod.io/console/gpu-cloud instead."
-  echo
-  read -r -p "Enter the datacenter ID to use: " DATACENTER_ID
-  [[ -n "$DATACENTER_ID" ]] || die "No datacenter ID entered."
+  log_info "Fetching current datacenter / GPU availability..."
+  local dc_json
+  dc_json="$(runpodctl datacenter list)" || die "Could not list datacenters - check availability at https://www.runpod.io/console/gpu-cloud instead."
+
+  # Field names (id, location, gpuAvailability[].displayName/.stockStatus)
+  # confirmed against live `runpodctl datacenter list` JSON output this
+  # session.
+  local menu_rows
+  menu_rows="$(jq -r '
+    .[]
+    | [.id, .location, ([.gpuAvailability[]? | select(.stockStatus != "" and .stockStatus != "none") | .displayName] | join(", "))]
+    | @tsv
+  ' <<< "$dc_json")"
+
+  [[ -n "$menu_rows" ]] || die "No datacenter data returned - check https://www.runpod.io/console/gpu-cloud instead."
+
+  local -a dc_ids=() dc_labels=()
+  while IFS=$'\t' read -r id location gpus; do
+    dc_ids+=("$id")
+    dc_labels+=("$(printf '%-10s %-15s %s' "$id" "$location" "${gpus:-no stock}")")
+  done <<< "$menu_rows"
+
+  log_info ""
+  local dc_choice
+  select_from_menu "Choose a datacenter" dc_choice "${dc_labels[@]}"
+  DATACENTER_ID="${dc_ids[$((dc_choice - 1))]}"
 }
 
 # --- step 5: network volume -------------------------------------------------
