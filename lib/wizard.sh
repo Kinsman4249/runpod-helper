@@ -87,8 +87,7 @@ setup_runpod_api_key() {
   log_info "== Step 2: RunPod API key =="
   log_info "Generate one at https://www.runpod.io/console/user/settings (Settings > API Keys) if you haven't already."
   local api_key
-  read -r -s -p "Paste your RunPod API key: " api_key
-  echo
+  prompt_text "Paste your RunPod API key ($TEXT_BACK_WORD to go back): " api_key -s || return 1
   [[ -n "$api_key" ]] || die "No API key entered."
   # `runpodctl config --apiKey` is deprecated in current releases and fails
   # outright (tries to write .runpod.yaml before the directory/file exist).
@@ -155,7 +154,7 @@ setup_datacenter() {
 
   log_info ""
   local dc_choice
-  select_from_menu "Choose a datacenter" dc_choice "${dc_labels[@]}"
+  select_from_menu "Choose a datacenter" dc_choice "${dc_labels[@]}" || return 1
   DATACENTER_ID="${dc_ids[$((dc_choice - 1))]}"
 }
 
@@ -164,13 +163,30 @@ setup_datacenter() {
 setup_network_volume() {
   log_info ""
   log_info "== Step 5: Network volume (persistent model-weights storage) =="
-  local vol_name vol_size
   log_info "Sizing guide: 60GB for 4-bit weights, 100GB for 8-bit or a" \
            "single fp16 model, 150-200GB to keep both presets or an fp16 +" \
            "quantized copy side by side. See PREREQUISITES.md for the table."
-  read -r -p "Volume name: " vol_name
-  read -r -p "Volume size in GB: " vol_size
-  [[ -n "$vol_name" && "$vol_size" =~ ^[0-9]+$ ]] || die "Need a name and a numeric size in GB."
+
+  # Only the two fields *before* the (billed, non-undoable) create call get
+  # back-out: name/size navigate between each other locally, and backing out
+  # of name (the first field) hands control to the previous wizard step. The
+  # ID paste after creation stays a plain read - the volume already exists
+  # by then, so "going back" wouldn't undo anything real.
+  local vol_name vol_size field="name"
+  while true; do
+    case "$field" in
+      name)
+        prompt_text "Volume name ($TEXT_BACK_WORD to go back): " vol_name || return 1
+        field="size"
+        ;;
+      size)
+        prompt_text "Volume size in GB ($TEXT_BACK_WORD for volume name): " vol_size || { field="name"; continue; }
+        [[ -n "$vol_name" && "$vol_size" =~ ^[0-9]+$ ]] || die "Need a name and a numeric size in GB."
+        break
+        ;;
+    esac
+  done
+
   log_info "Creating volume (this is a billed resource for as long as it exists," \
            "independent of whether a pod is attached - see README for the rate)."
   runpodctl network-volume create --name "$vol_name" --size "$vol_size" --data-center-id "$DATACENTER_ID" \
@@ -199,25 +215,42 @@ setup_github_app() {
   log_info ""
   read -r -p "Press Enter once the App is created, its key downloaded, and it's installed on the right repos... "
 
-  local app_id key_path
-  read -r -p "GitHub App ID: " app_id
-  [[ "$app_id" =~ ^[0-9]+$ ]] || die "App ID should be numeric."
-  read -r -p "Path to the downloaded private key (.pem): " key_path
-  key_path="${key_path/#\~/$HOME}"
-  [[ -r "$key_path" ]] || die "Can't read '$key_path'."
+  # app_id/key_path/installation_id all navigate locally (no billed or
+  # otherwise irreversible resource gets created here - 'gh token
+  # installations' is a read-only lookup, safe to re-run). Backing out of
+  # app_id, the first field, hands control to the previous wizard step.
+  local app_id key_path installation_id field="app_id"
+  while true; do
+    case "$field" in
+      app_id)
+        prompt_text "GitHub App ID ($TEXT_BACK_WORD to go back): " app_id || return 1
+        [[ "$app_id" =~ ^[0-9]+$ ]] || die "App ID should be numeric."
+        field="key_path"
+        ;;
+      key_path)
+        prompt_text "Path to the downloaded private key (.pem) ($TEXT_BACK_WORD for App ID): " key_path || { field="app_id"; continue; }
+        key_path="${key_path/#\~/$HOME}"
+        [[ -r "$key_path" ]] || die "Can't read '$key_path'."
 
-  install_gh_token_extension
-  log_info "Looking up installations for this App (no JWT hand-rolling needed -" \
-           "gh-token's 'installations' subcommand signs the JWT itself)..."
-  log_info "Check the 'repository_selection' field in the output below: if it says" \
-           "'all' instead of 'selected', the App got installed on every repo instead" \
-           "of just the ones this box should touch. Fix it at" \
-           "https://github.com/settings/installations/<id> (Repository access ->" \
-           "Only select repositories) before continuing."
-  gh token installations --key "$key_path" --app-id "$app_id" || die "gh-token couldn't list installations - check the App ID and key path."
-  echo
-  read -r -p "Paste the installation ID matching where you installed the App above: " installation_id
-  [[ "$installation_id" =~ ^[0-9]+$ ]] || die "Installation ID should be numeric."
+        install_gh_token_extension
+        log_info "Looking up installations for this App (no JWT hand-rolling needed -" \
+                 "gh-token's 'installations' subcommand signs the JWT itself)..."
+        log_info "Check the 'repository_selection' field in the output below: if it says" \
+                 "'all' instead of 'selected', the App got installed on every repo instead" \
+                 "of just the ones this box should touch. Fix it at" \
+                 "https://github.com/settings/installations/<id> (Repository access ->" \
+                 "Only select repositories) before continuing."
+        gh token installations --key "$key_path" --app-id "$app_id" || die "gh-token couldn't list installations - check the App ID and key path."
+        echo
+        field="installation_id"
+        ;;
+      installation_id)
+        prompt_text "Paste the installation ID matching where you installed the App above ($TEXT_BACK_WORD for key path): " installation_id || { field="key_path"; continue; }
+        [[ "$installation_id" =~ ^[0-9]+$ ]] || die "Installation ID should be numeric."
+        break
+        ;;
+    esac
+  done
 
   GITHUB_APP_ID="$app_id"
   GITHUB_APP_KEY_PATH="$key_path"
@@ -281,13 +314,27 @@ setup_cloudflare_tunnel() {
   log_info ""
   read -r -p "Press Enter once the tunnel, both hostnames, and the Access policy exist... "
 
-  read -r -p "SSH hostname (e.g. pod-ssh.yourdomain.com): " CLOUDFLARE_SSH_HOSTNAME
-  [[ -n "$CLOUDFLARE_SSH_HOSTNAME" ]] || die "No SSH hostname entered."
-  read -r -s -p "Paste the tunnel token: " CLOUDFLARE_TUNNEL_TOKEN
-  echo
-  # No cloudflared subcommand exists to validate a token's shape (confirmed
-  # absent from current docs) - non-empty is the only check available.
-  [[ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]] || die "No tunnel token entered."
+  # Nothing here creates or commits anything server-side (the tunnel/
+  # hostnames/policy were already made manually above), so both fields
+  # navigate locally and backing out of hostname (the first) exits the step.
+  local field="hostname"
+  while true; do
+    case "$field" in
+      hostname)
+        prompt_text "SSH hostname (e.g. pod-ssh.yourdomain.com) ($TEXT_BACK_WORD to go back): " CLOUDFLARE_SSH_HOSTNAME || return 1
+        [[ -n "$CLOUDFLARE_SSH_HOSTNAME" ]] || die "No SSH hostname entered."
+        field="token"
+        ;;
+      token)
+        prompt_text "Paste the tunnel token ($TEXT_BACK_WORD for hostname): " CLOUDFLARE_TUNNEL_TOKEN -s || { field="hostname"; continue; }
+        # No cloudflared subcommand exists to validate a token's shape
+        # (confirmed absent from current docs) - non-empty is the only
+        # check available.
+        [[ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]] || die "No tunnel token entered."
+        break
+        ;;
+    esac
+  done
   log_ok "Cloudflare Tunnel configured."
 }
 
@@ -323,9 +370,20 @@ setup_ssh_config() {
 setup_git_identity() {
   log_info ""
   log_info "== Step 9: git identity (used inside the pod, passed via --env) =="
-  read -r -p "git user.name: " GIT_USER_NAME
-  read -r -p "git user.email: " GIT_USER_EMAIL
-  [[ -n "$GIT_USER_NAME" && -n "$GIT_USER_EMAIL" ]] || die "Both git user.name and user.email are required."
+  local field="name"
+  while true; do
+    case "$field" in
+      name)
+        prompt_text "git user.name ($TEXT_BACK_WORD to go back): " GIT_USER_NAME || return 1
+        field="email"
+        ;;
+      email)
+        prompt_text "git user.email ($TEXT_BACK_WORD for user.name): " GIT_USER_EMAIL || { field="name"; continue; }
+        [[ -n "$GIT_USER_NAME" && -n "$GIT_USER_EMAIL" ]] || die "Both git user.name and user.email are required."
+        break
+        ;;
+    esac
+  done
 }
 
 # --- step 10: write config --------------------------------------------------
@@ -372,14 +430,23 @@ run_setup_wizard() {
   install_cloudflared
   install_gh_token_extension
 
-  setup_runpod_api_key
-  setup_ssh_key
-  setup_datacenter
-  setup_network_volume
-  setup_github_app
-  setup_cloudflare_tunnel
-  setup_ssh_config
-  setup_git_identity
+  # Steps 2-9 run as a back-able sequence: any step can return 1 (e.g. the
+  # user typed the safeword on its first prompt) to hand control to the
+  # step before it, instead of the whole wizard only being restartable from
+  # scratch. setup_ssh_key and setup_ssh_config have no prompts of their own
+  # (they just re-run their side effects) but stay in the list so stepping
+  # back past setup_datacenter/setup_git_identity lands somewhere sensible.
+  local -a wizard_steps=(
+    setup_runpod_api_key
+    setup_ssh_key
+    setup_datacenter
+    setup_network_volume
+    setup_github_app
+    setup_cloudflare_tunnel
+    setup_ssh_config
+    setup_git_identity
+  )
+  run_step_sequence wizard_steps
   write_config
 
   log_info ""

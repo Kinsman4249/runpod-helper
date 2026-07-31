@@ -107,10 +107,24 @@ ensure_network_volume() {
   log_info ""
   log_info "Sizing guide: 60GB for 4-bit weights, 100GB for 8-bit or a single" \
            "fp16 model, 150-200GB to keep both presets side by side."
-  local vol_name vol_size
-  read -r -p "Volume name: " vol_name
-  read -r -p "Volume size in GB: " vol_size
-  [[ -n "$vol_name" && "$vol_size" =~ ^[0-9]+$ ]] || die "Need a name and a numeric size in GB."
+  # name/size navigate locally (nothing committed yet); this recovery flow
+  # isn't part of a step sequence, so backing out of name (the first field)
+  # just aborts - there's no earlier step to fall back to.
+  local vol_name vol_size field="name"
+  while true; do
+    case "$field" in
+      name)
+        prompt_text "Volume name ($TEXT_BACK_WORD to cancel): " vol_name \
+          || die "Cancelled. No network volume to attach. Run startup.sh --setup to point at a different one, or create one manually."
+        field="size"
+        ;;
+      size)
+        prompt_text "Volume size in GB ($TEXT_BACK_WORD for volume name): " vol_size || { field="name"; continue; }
+        [[ -n "$vol_name" && "$vol_size" =~ ^[0-9]+$ ]] || die "Need a name and a numeric size in GB."
+        break
+        ;;
+    esac
+  done
 
   log_info "Creating volume (billed for as long as it exists, independent of" \
            "whether a pod is attached - see README for the rate)."

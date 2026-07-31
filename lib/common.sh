@@ -45,6 +45,51 @@ confirm() {
   [[ "$reply" =~ ^[Yy]$ ]]
 }
 
+# Safeword for free-text prompts (see prompt_text below). Distinct from the
+# numbered-menu safeword ('b') on purpose: a bare "b" is plausible real input
+# for a text field (e.g. someone naming a volume "b"), so it can't double as
+# an escape hatch there the way it safely can in a 1-N menu.
+TEXT_BACK_WORD=":b"
+
+# Free-text prompt with the same 'back out' contract as select_from_menu:
+# typing the safeword ($TEXT_BACK_WORD) returns 1 and leaves the result var
+# unset, so the caller can re-do (or bounce back to) whatever came before
+# this prompt. Pass -s as a 4th arg for hidden input (API keys, tokens).
+# Usage: prompt_text "Prompt text: " result_var [-s]
+prompt_text() {
+  local prompt="$1" result_var="$2" secret="${3:-}"
+  local reply
+  if [[ "$secret" == "-s" ]]; then
+    read -r -s -p "$prompt" reply
+    echo
+  else
+    read -r -p "$prompt" reply
+  fi
+  [[ "$reply" == "$TEXT_BACK_WORD" ]] && return 1
+  printf -v "$result_var" '%s' "$reply"
+}
+
+# Runs an ordered list of step functions (each named in the $1 array),
+# letting any step "go back" by returning 1 - the runner then re-invokes the
+# previous step instead of advancing. Steps are responsible for their own
+# internal back/forward navigation (e.g. between fields within one step);
+# they should only return 1 to hand control to whatever step came before
+# them. Returning 1 from the very first step just re-runs that same step,
+# since there's nothing earlier to fall back to.
+# Usage: local -a steps=(step_one step_two step_three); run_step_sequence steps
+run_step_sequence() {
+  local -n steps_ref="$1"
+  local i=0
+  local n=${#steps_ref[@]}
+  while (( i < n )); do
+    if "${steps_ref[$i]}"; then
+      (( i++ ))
+    else
+      (( i > 0 )) && (( i-- ))
+    fi
+  done
+}
+
 # Numbered-menu prompt shared by every "pick one of these" spot (preset,
 # GPU, datacenter) so they all look and behave the same instead of each
 # hand-rolling its own read/case. Prints the options, loops until a valid
