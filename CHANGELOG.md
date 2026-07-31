@@ -2,6 +2,12 @@
 
 ## Change history
 
+### 0.5.0 - Pod image and multi-frontend support
+
+1. Added the complete pod image (`image/Dockerfile`) replacing the placeholder RunPod base image: builds on `ghcr.io/ggml-org/llama.cpp:server-cuda` (which ships a pre-compiled CUDA-accelerated llama-server), adds OpenHands, llama.cpp's built-in web UI, and Open WebUI as three mutually exclusive frontend options, plus `gh` CLI and `cloudflared` for SSH tunneling and idle detection. Image is built by `../.github/workflows/build-image.yml` and published to `ghcr.io/kinsman4249/runpod-helper-image:latest` on every push to `image/**`.
+2. Added frontend selection as a third wizard step in `pick_preset_and_gpu()`: users now choose between three frontends (OpenHands, llama.cpp's built-in UI, or Open WebUI) after picking their model preset and GPU, all served on port 3000 (the sole port forwarded through the Cloudflare tunnel). Frontend choice is saved to the session cache and carried to the pod as a `FRONTEND` environment variable.
+3. Added `image/entrypoint.sh` (the container CMD) to download model weights on first boot, start llama-server with appropriate flags per preset, then launch the chosen frontend with LLM connection details baked in, and finally hand off to `onstart.sh` for tunnel and idle-watchdog startup.
+
 ### 0.4.0 - Wizard step back-navigation
 
 1. Added back-out capability to all wizard steps: new `prompt_text()` function in `lib/common.sh` provides free-text input prompts with a safeword (`:b`) that returns 1, allowing the caller to re-run the previous prompt or step. Distinct from menu back-navigation (`'b'` in numbered menus) to avoid conflicts with legitimate text input (e.g., naming a volume "b").
