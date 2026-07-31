@@ -2,6 +2,12 @@
 
 ## Change history
 
+### 0.2.0 - Wizard UX and validation enhancements
+
+1. Enhanced PREREQUISITES.md with detailed guidance on datacenter selection tradeoffs (jurisdiction/privacy vs. latency), GPU tier sizing for each model preset (4-bit/8-bit/fp16), and network volume sizing recommendations based on model precision and storage needs. Updated README.md to reference this expanded guidance.
+2. Refactored GPU and datacenter selection (`lib/launch.sh`, `lib/wizard.sh`) to use a common menu-driven interface (`select_from_menu()` helper in `lib/common.sh`) with smart filtering: GPU selection now auto-filters by VRAM requirement and datacenter availability, preventing invalid picks instead of warning after the fact.
+3. Enhanced wizard step-by-step guidance (particularly GitHub App and Cloudflare Tunnel setup) with significantly more detailed substeps, field-by-field instructions, and links to configuration checks, reducing ambiguity and setup errors on first run.
+
 ### 0.1.0 - Initial release
 
 1. Added five core lifecycle scripts for pod setup and runtime: `startup.sh`
