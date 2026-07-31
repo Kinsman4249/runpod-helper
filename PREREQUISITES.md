@@ -36,6 +36,33 @@ over.
    `localhost:<port>`), and setting up an Access policy covering both, then
    asks you to paste back the SSH hostname and the tunnel token.
 
+   In brief, what that involves: Networking > Tunnels > Create a tunnel
+   (Cloudflared connector, named, not the quick/trycloudflare kind) ->
+   copy the tunnel token from the install command shown (or later from the
+   tunnel's Overview page) -> add the two Public Hostname routes described
+   above under the tunnel's "Public Hostname" tab -> then, under Zero Trust
+   > Access > Applications, add an application, stay on the "Self-hosted
+   and private" tab of the type-picker modal (the Private
+   destinations/Workers/Public DNS/Service auth sub-tabs there are just
+   examples, not choices you need to make) and click "Continue with
+   Self-hosted and private" -> on the Destinations section, add the SSH
+   subdomain as a public hostname, then click "+ Add public hostname" to
+   add the OpenHands subdomain too (one app supports up to 5 destinations,
+   so a single Access application can cover both; ignore the unrelated
+   "Workers" section) -> add a policy that allows only your own email ->
+   save. Skipping the Access step leaves localhost:22 and the OpenHands UI
+   reachable by anyone who finds the hostname. Sanity check on the
+   tunnel's "Routes" tab afterward: both hostnames should show a
+   "Published application" badge, confirming the Access policy actually
+   attached to them - if either is missing the badge, go back and fix
+   that hostname's Access application before continuing.
+
+   The OpenHands port isn't nailed down yet - it depends on the paired
+   OpenHands+llama.cpp image, which is still a TODO placeholder (see
+   `lib/launch.sh`). 3000 is OpenHands' usual default but is unconfirmed
+   here; check that image's docs/config once it exists rather than
+   assuming 3000.
+
 ## GitHub
 
 1. Have a GitHub account with access to whichever repos this box should
@@ -48,6 +75,18 @@ over.
    automatically (via the `gh-token` extension's `installations` command,
    using the key you just gave it) rather than asking you to hunt for that
    number yourself - you just confirm which installation it found.
+
+   The app is only ever used to mint installation tokens for git push/PR
+   operations - it never receives inbound events. So on the "New GitHub
+   App" form: leave Callback URL blank, and uncheck Webhook > Active
+   (leaving Webhook URL/Secret empty is fine once it's inactive).
+
+   When the wizard looks up the installation, check the
+   `repository_selection` field in its output: it should say `selected`,
+   not `all`. If it says `all`, the App got installed on every repo
+   instead of just the ones this box should touch - fix it at
+   `https://github.com/settings/installations/<id>` (Repository access ->
+   Only select repositories) before continuing.
 
 ## Local machine
 
