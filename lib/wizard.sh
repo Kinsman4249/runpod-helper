@@ -379,6 +379,7 @@ setup_git_identity() {
 
 write_config() {
   mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
   # Written with a restrictive umask for the duration of this call so the
   # file is never briefly world-readable between creation and chmod, and
   # %q-quoted so a value containing spaces or shell metacharacters (e.g. a

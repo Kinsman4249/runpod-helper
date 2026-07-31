@@ -36,6 +36,23 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "'$1' not found on PATH. Run 'startup.sh --setup' first."
 }
 
+# Tightens a sensitive file to 600 (owner read/write only) if it isn't
+# already, warning so it's visible when it happens. Covers files we don't
+# fully control the creation of - e.g. runpodctl writes ~/.runpod/config.toml
+# with its own umask (644 by default), and a GitHub App .pem is often just
+# downloaded from a browser (which typically leaves it group/world-readable).
+secure_file() {
+  local path="$1"
+  [[ -e "$path" ]] || return 0
+  local mode
+  mode="$(stat -c %a "$path")"
+  if [[ "$mode" != "600" ]]; then
+    chmod 600 "$path"
+    log_warn "Tightened permissions on $path (was $mode, now 600) - it holds a credential."
+  fi
+  return 0
+}
+
 # Simple yes/no prompt. Defaults to "no" on empty input so an accidental
 # Enter key never confirms something destructive or costly.
 confirm() {
@@ -126,8 +143,8 @@ validate_cloudflare_tunnel_token() {
     sleep 1; waited=$((waited + 1))
   done
 
-  kill "$cf_pid" 2>/dev/null
-  wait "$cf_pid" 2>/dev/null
+  kill "$cf_pid" 2>/dev/null || true
+  wait "$cf_pid" 2>/dev/null || true
   rm -f "$logfile"
 
   case "$result" in

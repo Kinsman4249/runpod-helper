@@ -59,6 +59,19 @@ fi
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
+# runpodctl is a separate process and only reads RUNPOD_API_KEY from its own
+# environment, not from vars merely set in this shell - source'ing the plain
+# KEY=value line above doesn't export it, so every runpodctl call would
+# silently fall back to whatever key is cached in ~/.runpod/config.toml
+# instead of the one in $CONFIG_FILE.
+export RUNPOD_API_KEY
+
+# Defense in depth: catches a credential file that ended up world/group-
+# readable, whether from a tool's own umask or a browser download, on every
+# run (not just at setup) so a permission regression doesn't sit unnoticed.
+secure_file "$SSH_KEY_PATH"
+secure_file "$GITHUB_APP_KEY_PATH"
+secure_file "$HOME/.runpod/config.toml"
 
 if [[ "$ROTATE" == 1 ]]; then
   rotate_credentials
