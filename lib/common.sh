@@ -49,7 +49,9 @@ confirm() {
 # GPU, datacenter) so they all look and behave the same instead of each
 # hand-rolling its own read/case. Prints the options, loops until a valid
 # number is entered, and writes that 1-based index into $2 (the caller maps
-# it back to whatever value array it cares about).
+# it back to whatever value array it cares about). Typing 'b' backs out
+# without picking: the function returns 1 and leaves $2 unset, so the
+# caller can go re-do whatever step came before this menu.
 # Usage: select_from_menu "Choose a preset" result_var "label one" "label two" ...
 select_from_menu() {
   local prompt="$1" result_var="$2"
@@ -62,9 +64,10 @@ select_from_menu() {
   done
   local choice
   while true; do
-    read -r -p "$prompt (1-$n): " choice
+    read -r -p "$prompt (1-$n, or b to go back): " choice
+    [[ "$choice" == "b" || "$choice" == "B" ]] && return 1
     [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= n )) && break
-    log_warn "Enter a number between 1 and $n."
+    log_warn "Enter a number between 1 and $n, or 'b' to go back."
   done
   printf -v "$result_var" '%s' "$choice"
 }

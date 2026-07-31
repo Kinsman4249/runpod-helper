@@ -2,6 +2,12 @@
 
 ## Change history
 
+### 0.3.0 - Menu UX refinements and storage resilience
+
+1. Refactored menu helper (`select_from_menu()` in `lib/common.sh`) to support back-navigation: typing `'b'` on any numbered menu (preset, GPU, datacenter) returns to the previous step instead of committing the choice. Restructured preset/GPU selection flow in `lib/launch.sh` as a two-step loop, allowing users to change their preset after seeing available GPUs without re-running the entire script.
+2. Fixed session cache file corruption issue: GPU IDs and preset names containing spaces are now properly shell-quoted (using `printf '%q'` format) when saved to `~/.runpod-lab/last-session`, preventing `command not found` errors on the next run when the cache is sourced.
+3. Added network volume resilience: new `ensure_network_volume()` function in `lib/launch.sh` runs at startup, verifies the configured volume still exists via `runpodctl network-volume get`, and if deleted (e.g. overnight cost-saving), prompts to create a replacement in the same datacenter (required for pod attachment) and persists the new ID to the config file.
+
 ### 0.2.0 - Wizard UX and validation enhancements
 
 1. Enhanced PREREQUISITES.md with detailed guidance on datacenter selection tradeoffs (jurisdiction/privacy vs. latency), GPU tier sizing for each model preset (4-bit/8-bit/fp16), and network volume sizing recommendations based on model precision and storage needs. Updated README.md to reference this expanded guidance.

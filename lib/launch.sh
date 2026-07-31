@@ -24,62 +24,107 @@ pick_preset_and_gpu() {
     }
   fi
 
-  log_info ""
-  log_info "Model preset:"
   local -a preset_values=("qwen36-27b" "qwen3-coder-next")
   local -a preset_labels=(
     "qwen36-27b       - dense model, runs on any GPU tier including RTX 4090"
     "qwen3-coder-next - MoE model, needs 40GB+ VRAM (A6000 / L40S / A100 class)"
   )
-  local preset_choice
-  select_from_menu "Choose a preset" preset_choice "${preset_labels[@]}"
-  MODEL_PRESET="${preset_values[$((preset_choice - 1))]}"
 
-  log_info ""
-  log_info "Fetching live GPU availability for datacenter $DATACENTER_ID..."
-  local gpu_json
-  gpu_json="$(runpodctl gpu list)" || die "Could not list GPUs - check https://www.runpod.io/console/gpu-cloud instead."
+  # Two-step wizard (preset, then GPU) that lets 'b' on the GPU menu bounce
+  # back to re-pick the preset, instead of committing to a GPU choice you
+  # can only undo by re-running the whole script.
+  local step="preset" preset_choice gpu_choice
+  while true; do
+    case "$step" in
+      preset)
+        log_info ""
+        log_info "Model preset:"
+        select_from_menu "Choose a preset" preset_choice "${preset_labels[@]}" || continue
+        MODEL_PRESET="${preset_values[$((preset_choice - 1))]}"
+        step="gpu"
+        ;;
+      gpu)
+        log_info ""
+        log_info "Fetching live GPU availability for datacenter $DATACENTER_ID..."
+        local gpu_json
+        gpu_json="$(runpodctl gpu list)" || die "Could not list GPUs - check https://www.runpod.io/console/gpu-cloud instead."
 
-  local min_vram=0
-  [[ "$MODEL_PRESET" == "qwen3-coder-next" ]] && min_vram=40
+        local min_vram=0
+        [[ "$MODEL_PRESET" == "qwen3-coder-next" ]] && min_vram=40
 
-  # Field names (gpuId, displayName, memoryInGb, securePricePerHr,
-  # dataCenterAvailability[].stockStatus) confirmed against live `runpodctl
-  # gpu list` JSON output this session. Filtering to the target datacenter
-  # and the preset's VRAM floor here means a bad pick is no longer possible,
-  # instead of just being warned about.
-  local menu_rows
-  menu_rows="$(jq -r --arg dc "$DATACENTER_ID" --argjson minvram "$min_vram" '
-    .[]
-    | . as $g
-    | ($g.dataCenterAvailability[]? | select(.dataCenterId == $dc) | .stockStatus) as $stock
-    | select($stock != "none")
-    | select($g.memoryInGb >= $minvram)
-    | [$g.gpuId, $g.displayName, ($g.memoryInGb | tostring), ($g.securePricePerHr | tostring), $stock]
-    | @tsv
-  ' <<< "$gpu_json" | sort -t $'\t' -k4 -n)"
+        # Field names (gpuId, displayName, memoryInGb, securePricePerHr,
+        # dataCenterAvailability[].stockStatus) confirmed against live
+        # `runpodctl gpu list` JSON output this session. Filtering to the
+        # target datacenter and the preset's VRAM floor here means a bad
+        # pick is no longer possible, instead of just being warned about.
+        local menu_rows
+        menu_rows="$(jq -r --arg dc "$DATACENTER_ID" --argjson minvram "$min_vram" '
+          .[]
+          | . as $g
+          | ($g.dataCenterAvailability[]? | select(.dataCenterId == $dc) | .stockStatus) as $stock
+          | select($stock != "none")
+          | select($g.memoryInGb >= $minvram)
+          | [$g.gpuId, $g.displayName, ($g.memoryInGb | tostring), ($g.securePricePerHr | tostring), $stock]
+          | @tsv
+        ' <<< "$gpu_json" | sort -t $'\t' -k4 -n)"
 
-  [[ -n "$menu_rows" ]] || die "No GPUs meeting the ${min_vram}GB+ VRAM requirement are currently available in datacenter $DATACENTER_ID. Check https://www.runpod.io/console/gpu-cloud."
+        [[ -n "$menu_rows" ]] || die "No GPUs meeting the ${min_vram}GB+ VRAM requirement are currently available in datacenter $DATACENTER_ID. Check https://www.runpod.io/console/gpu-cloud."
 
-  local -a gpu_ids=() gpu_labels=()
-  while IFS=$'\t' read -r gid dname vram price stock; do
-    gpu_ids+=("$gid")
-    gpu_labels+=("$(printf '%-20s %5sGB  $%s/hr  [%s]' "$dname" "$vram" "$price" "$stock")")
-  done <<< "$menu_rows"
+        local -a gpu_ids=() gpu_labels=()
+        while IFS=$'\t' read -r gid dname vram price stock; do
+          gpu_ids+=("$gid")
+          gpu_labels+=("$(printf '%-20s %5sGB  $%s/hr  [%s]' "$dname" "$vram" "$price" "$stock")")
+        done <<< "$menu_rows"
 
-  log_info ""
-  log_info "Available GPUs in $DATACENTER_ID (secure cloud \$/hr):"
-  local gpu_choice
-  select_from_menu "Choose a GPU" gpu_choice "${gpu_labels[@]}"
-  GPU_ID="${gpu_ids[$((gpu_choice - 1))]}"
+        log_info ""
+        log_info "Available GPUs in $DATACENTER_ID (secure cloud \$/hr):"
+        select_from_menu "Choose a GPU" gpu_choice "${gpu_labels[@]}" || { step="preset"; continue; }
+        GPU_ID="${gpu_ids[$((gpu_choice - 1))]}"
+        break
+        ;;
+    esac
+  done
 
   mkdir -p "$CONFIG_DIR"
   ( umask 077
-    cat > "$LAST_SESSION_FILE" <<EOF
-MODEL_PRESET=$MODEL_PRESET
-GPU_ID=$GPU_ID
-EOF
+    printf 'MODEL_PRESET=%q\nGPU_ID=%q\n' "$MODEL_PRESET" "$GPU_ID" > "$LAST_SESSION_FILE"
   )
+}
+
+# --- network volume check ---------------------------------------------------
+
+# Confirms the configured network volume still exists before we get any
+# further, and offers to create a replacement (in the same datacenter,
+# since a pod can only attach a volume from its own datacenter) if it's
+# gone - e.g. deleted overnight to stop paying for idle storage.
+ensure_network_volume() {
+  runpodctl network-volume get "$NETWORK_VOLUME_ID" >/dev/null 2>&1 && return
+
+  log_warn "Network volume $NETWORK_VOLUME_ID (from $CONFIG_FILE) doesn't exist anymore."
+  confirm "Create a new one in datacenter $DATACENTER_ID now?" \
+    || die "No network volume to attach. Run startup.sh --setup to point at a different one, or create one manually."
+
+  log_info ""
+  log_info "Sizing guide: 60GB for 4-bit weights, 100GB for 8-bit or a single" \
+           "fp16 model, 150-200GB to keep both presets side by side."
+  local vol_name vol_size
+  read -r -p "Volume name: " vol_name
+  read -r -p "Volume size in GB: " vol_size
+  [[ -n "$vol_name" && "$vol_size" =~ ^[0-9]+$ ]] || die "Need a name and a numeric size in GB."
+
+  log_info "Creating volume (billed for as long as it exists, independent of" \
+           "whether a pod is attached - see README for the rate)."
+  # Raw output shown as-is and the ID pasted back, same as the setup
+  # wizard's setup_network_volume() - not parsed automatically since the
+  # exact create-response shape hasn't been confirmed against a live call.
+  runpodctl network-volume create --name "$vol_name" --size "$vol_size" --data-center-id "$DATACENTER_ID" \
+    || die "Volume creation failed."
+  echo
+  read -r -p "Paste the new network volume ID shown above: " NETWORK_VOLUME_ID
+  [[ -n "$NETWORK_VOLUME_ID" ]] || die "No volume ID entered."
+
+  sed -i "s|^NETWORK_VOLUME_ID=.*|NETWORK_VOLUME_ID=$NETWORK_VOLUME_ID|" "$CONFIG_FILE"
+  log_ok "Saved new NETWORK_VOLUME_ID to $CONFIG_FILE."
 }
 
 # --- pod creation ------------------------------------------------------------
@@ -185,6 +230,7 @@ push_github_token() {
 # --- entry point -------------------------------------------------------------
 
 run_normal_launch() {
+  ensure_network_volume
   pick_preset_and_gpu
   create_pod
   wait_for_pod_ready
