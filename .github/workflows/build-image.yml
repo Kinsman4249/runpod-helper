@@ -23,7 +23,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/runpod-helper-image
+  # GHCR repo names must be lowercase; github.repository_owner preserves
+  # the account's display case (Kinsman4249), so lowercase it explicitly.
+  IMAGE_NAME: ghcr.io/${{ toLower(github.repository_owner) }}/runpod-helper-image
 
 jobs:
   build-and-push:
