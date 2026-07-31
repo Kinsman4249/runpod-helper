@@ -3,14 +3,10 @@
 
 CONTAINER_DISK_GB=25   # code + OS only; models live on the network volume.
 
-# TODO(image): placeholder until the OpenHands + llama.cpp image (built by
-# the paired prompt that runs *inside* the pod this script creates) exists.
-# This is RunPod's official CUDA/PyTorch base image - it will boot and run
-# onstart.sh fine, but has none of the OpenHands/llama.cpp stack baked in
-# yet. Swap this for the real image name/tag (or a --template-id) once
-# that build exists. NOT independently verified against the RunPod image
-# registry this session - confirm the tag still exists before relying on it.
-IMAGE_NAME="runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
+# Built by ../image/Dockerfile, published by
+# ../.github/workflows/build-image.yml on every push to image/**. Not yet
+# confirmed pullable by a live pod - see this repo's handoff.md.
+IMAGE_NAME="ghcr.io/kinsman4249/runpod-helper-image:latest"
 
 # --- preset + GPU selection -------------------------------------------------
 
@@ -18,8 +14,8 @@ pick_preset_and_gpu() {
   if [[ -f "$LAST_SESSION_FILE" && "$NEW_SESSION" != 1 ]]; then
     # shellcheck source=/dev/null
     source "$LAST_SESSION_FILE"
-    [[ -n "${MODEL_PRESET:-}" && -n "${GPU_ID:-}" ]] && {
-      log_info "Reusing last session: preset=$MODEL_PRESET gpu=$GPU_ID (pass --new to change)."
+    [[ -n "${MODEL_PRESET:-}" && -n "${GPU_ID:-}" && -n "${FRONTEND:-}" ]] && {
+      log_info "Reusing last session: preset=$MODEL_PRESET gpu=$GPU_ID frontend=$FRONTEND (pass --new to change)."
       return
     }
   fi
@@ -30,10 +26,20 @@ pick_preset_and_gpu() {
     "qwen3-coder-next - MoE model, needs 40GB+ VRAM (A6000 / L40S / A100 class)"
   )
 
-  # Two-step wizard (preset, then GPU) that lets 'b' on the GPU menu bounce
-  # back to re-pick the preset, instead of committing to a GPU choice you
-  # can only undo by re-running the whole script.
-  local step="preset" preset_choice gpu_choice
+  # Only one frontend runs per pod (see image/entrypoint.sh) - all three
+  # listen on port 3000, the one port the Cloudflare tunnel forwards, so
+  # this is a straight either/or, not a multi-select.
+  local -a frontend_values=("openhands" "llama-webui" "open-webui")
+  local -a frontend_labels=(
+    "openhands   - OpenHands coding agent GUI"
+    "llama-webui - llama.cpp's own built-in chat UI (lightest option)"
+    "open-webui  - Open WebUI, general-purpose chat frontend"
+  )
+
+  # Three-step wizard (preset, then GPU, then frontend) where 'b' on any
+  # menu bounces back to re-pick the previous one, instead of committing to
+  # a choice you can only undo by re-running the whole script.
+  local step="preset" preset_choice gpu_choice frontend_choice
   while true; do
     case "$step" in
       preset)
@@ -80,6 +86,13 @@ pick_preset_and_gpu() {
         log_info "Available GPUs in $DATACENTER_ID (secure cloud \$/hr):"
         select_from_menu "Choose a GPU" gpu_choice "${gpu_labels[@]}" || { step="preset"; continue; }
         GPU_ID="${gpu_ids[$((gpu_choice - 1))]}"
+        step="frontend"
+        ;;
+      frontend)
+        log_info ""
+        log_info "Frontend (the one thing served on port 3000 through the tunnel):"
+        select_from_menu "Choose a frontend" frontend_choice "${frontend_labels[@]}" || { step="gpu"; continue; }
+        FRONTEND="${frontend_values[$((frontend_choice - 1))]}"
         break
         ;;
     esac
@@ -87,7 +100,7 @@ pick_preset_and_gpu() {
 
   mkdir -p "$CONFIG_DIR"
   ( umask 077
-    printf 'MODEL_PRESET=%q\nGPU_ID=%q\n' "$MODEL_PRESET" "$GPU_ID" > "$LAST_SESSION_FILE"
+    printf 'MODEL_PRESET=%q\nGPU_ID=%q\nFRONTEND=%q\n' "$MODEL_PRESET" "$GPU_ID" "$FRONTEND" > "$LAST_SESSION_FILE"
   )
 }
 
@@ -153,11 +166,11 @@ create_pod() {
   log_info ""
   log_info "Creating pod (GPU $GPU_ID, preset $MODEL_PRESET, auto-terminate at $terminate_after UTC)..."
 
-  # --env deliberately carries ONLY these five names. No GitHub credential
+  # --env deliberately carries ONLY these six names. No GitHub credential
   # goes here - see the comment above push_github_token() for why.
   local env_json
-  env_json=$(printf '{"CLOUDFLARE_TUNNEL_TOKEN":"%s","GIT_USER_NAME":"%s","GIT_USER_EMAIL":"%s","MODEL_PRESET":"%s","IDLE_MINUTES":"%s","RUNPOD_API_KEY":"%s"}' \
-    "$CLOUDFLARE_TUNNEL_TOKEN" "$GIT_USER_NAME" "$GIT_USER_EMAIL" "$MODEL_PRESET" "$IDLE_MINUTES" "$RUNPOD_API_KEY")
+  env_json=$(printf '{"CLOUDFLARE_TUNNEL_TOKEN":"%s","GIT_USER_NAME":"%s","GIT_USER_EMAIL":"%s","MODEL_PRESET":"%s","FRONTEND":"%s","IDLE_MINUTES":"%s","RUNPOD_API_KEY":"%s"}' \
+    "$CLOUDFLARE_TUNNEL_TOKEN" "$GIT_USER_NAME" "$GIT_USER_EMAIL" "$MODEL_PRESET" "$FRONTEND" "$IDLE_MINUTES" "$RUNPOD_API_KEY")
 
   local create_output
   create_output="$(runpodctl pod create \
@@ -253,5 +266,6 @@ run_normal_launch() {
   log_info ""
   log_ok "Pod ready."
   log_info "Connect with: ssh runpod-lab"
+  log_info "Frontend on port 3000 (via the tunnel): $FRONTEND"
   log_info "Pod ID: $POD_ID   Preset: $MODEL_PRESET   Idle limit: ${IDLE_MINUTES}m   Max runtime: ${MAX_RUNTIME_HOURS}h"
 }

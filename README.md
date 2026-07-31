@@ -1,8 +1,9 @@
 # runpod-helper
 
-One-time-setup, mostly-hands-off tooling to run OpenHands + llama.cpp
-coding agents on a rented RunPod Secure Cloud GPU pod, with the code disk
-destroyed every session and nothing long-lived stored on RunPod's side.
+One-time-setup, mostly-hands-off tooling to run OpenHands (or a plain
+chat frontend) against llama.cpp on a rented RunPod Secure Cloud GPU pod,
+with the code disk destroyed every session and nothing long-lived stored
+on RunPod's side.
 
 ## What this does
 
@@ -30,6 +31,12 @@ destroyed every session and nothing long-lived stored on RunPod's side.
   nest containers anyway), accepting the reduced sandbox isolation
   specifically because the code disk this runs on is destroyed every
   session.
+- Frontend is a per-launch choice, not fixed: the pod image
+  (`image/Dockerfile`) ships OpenHands, llama.cpp's own built-in chat UI,
+  and Open WebUI side by side, but only ever runs one at a time - whichever
+  `FRONTEND` you pick in the wizard - on port 3000, the one port forwarded
+  through the Cloudflare tunnel. Switching frontends just means picking a
+  different option on the next `./startup.sh --new` launch, no rebuild.
 
 ## Why
 
@@ -48,14 +55,17 @@ destroyed every session and nothing long-lived stored on RunPod's side.
 
 All five scripts (`startup.sh`, `onstart.sh`, `idle-watchdog.sh`,
 `safety-commit.sh`, plus the `lib/` helpers `startup.sh` sources) are
-written and pass `bash -n`. Not yet run against a real pod. One known
-gap: `lib/launch.sh` currently launches a generic RunPod base image
-(`IMAGE_NAME`, clearly marked `TODO` in that file) - the actual
-OpenHands + llama.cpp image is built by a separate, paired setup and
-needs to be swapped in before this is usable end to end. The SSH
-idle-detection method in `idle-watchdog.sh` also hasn't been verified
-against a real cloudflared-proxied session yet - see the caveat comment
-at the top of that file.
+written and pass `bash -n`, and `IMAGE_NAME` in `lib/launch.sh` now
+points at a real image (`image/Dockerfile`, published by
+`.github/workflows/build-image.yml`) instead of the old generic
+placeholder. None of this has been run against a real pod yet, though -
+the first live launch attempt caught the placeholder-image gap (no
+`onstart.sh` baked in, so `cloudflared` never started) before the image
+existed; that's now fixed, but the actual image hasn't been built/pushed
+or exercised on a pod. The SSH idle-detection method in
+`idle-watchdog.sh` also hasn't been verified against a real
+cloudflared-proxied session yet - see the caveat comment at the top of
+that file.
 
 ## Setup
 

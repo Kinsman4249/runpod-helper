@@ -32,9 +32,10 @@ over.
    to.
 3. Nothing else ahead of time. The wizard pauses with the exact console
    steps for creating the named Tunnel, adding two Public Hostname routes
-   on it (one for SSH -> `localhost:22`, one for the OpenHands UI ->
-   `localhost:<port>`), and setting up an Access policy covering both, then
-   asks you to paste back the SSH hostname and the tunnel token.
+   on it (one for SSH -> `localhost:22`, one for the frontend (OpenHands,
+   llama.cpp's built-in UI, or Open WebUI, whichever you pick at launch)
+   -> `localhost:3000`), and setting up an Access policy covering both,
+   then asks you to paste back the SSH hostname and the tunnel token.
 
    In brief, what that involves: Networking > Tunnels > Create a tunnel
    (Cloudflared connector, named, not the quick/trycloudflare kind) ->
@@ -47,21 +48,21 @@ over.
    examples, not choices you need to make) and click "Continue with
    Self-hosted and private" -> on the Destinations section, add the SSH
    subdomain as a public hostname, then click "+ Add public hostname" to
-   add the OpenHands subdomain too (one app supports up to 5 destinations,
+   add the frontend subdomain too (one app supports up to 5 destinations,
    so a single Access application can cover both; ignore the unrelated
    "Workers" section) -> add a policy that allows only your own email ->
-   save. Skipping the Access step leaves localhost:22 and the OpenHands UI
+   save. Skipping the Access step leaves localhost:22 and the frontend
    reachable by anyone who finds the hostname. Sanity check on the
    tunnel's "Routes" tab afterward: both hostnames should show a
    "Published application" badge, confirming the Access policy actually
    attached to them - if either is missing the badge, go back and fix
    that hostname's Access application before continuing.
 
-   The OpenHands port isn't nailed down yet - it depends on the paired
-   OpenHands+llama.cpp image, which is still a TODO placeholder (see
-   `lib/launch.sh`). 3000 is OpenHands' usual default but is unconfirmed
-   here; check that image's docs/config once it exists rather than
-   assuming 3000.
+   Port 3000 is fixed regardless of which frontend you pick at launch
+   (`openhands` / `llama-webui` / `open-webui`, see `lib/launch.sh`'s
+   `pick_preset_and_gpu()`) - `image/entrypoint.sh` always binds whichever
+   one is chosen to that port, so the second Public Hostname route above
+   never needs to change when you switch frontends between launches.
 
 ## GitHub
 
@@ -137,8 +138,12 @@ total/~3B active) presets this repo ships:
 | Both presets kept side by side, or fp16 + a quantized copy | - | - | 150-200GB |
 
 `CONTAINER_DISK_GB` in `lib/launch.sh` (currently 25GB) is separate from
-the volume and only needs to hold the OS, `llama.cpp`, and OpenHands -
-model weights always live on the network volume, not the container disk.
+the volume and only needs to hold the OS, `llama.cpp`, and all three
+frontends (OpenHands, llama.cpp's built-in UI, Open WebUI - only one runs
+per pod, but the image ships all three so you can switch on the next
+launch without a rebuild) - model weights always live on the network
+volume, not the container disk. Not yet measured against a real build;
+bump this if the image ends up bigger than 25GB.
 A first-time model download can briefly need close to 2x the weight size
 (source cache + destination copy) unless you download directly to the
 volume path without an intermediate cache, so don't size the volume down
