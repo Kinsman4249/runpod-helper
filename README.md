@@ -49,19 +49,20 @@ destroyed every session and nothing long-lived stored on RunPod's side.
 Scaffold and community-health files only, as of this commit. Scripts
 land as they're built.
 
-## Requirements
+## Setup
 
-- `runpodctl`, `gh`, and the `gh-token` extension (`Link-/gh-token`)
-  installed locally as user-level binaries. This project's author runs
-  an immutable-OS setup (Bazzite/Fedora, rpm-ostree based) where these
-  go in `~/.local/bin` rather than through the system package manager -
-  see comments in `startup.sh` once it lands if that applies to you too.
-- A RunPod account with Secure Cloud access and a persistent Network
-  Volume for model weights.
-- A GitHub App, installed only on the repos this tooling should be able
-  to push to, with its private key stored locally - never in this repo.
-- A Cloudflare account with a named Tunnel configured for the pod's
-  SSH/OpenHands UI ingress.
+First run: `./startup.sh` detects there's no local config yet and walks
+you through a one-time setup wizard - installing the local tools it
+needs, taking your RunPod API key, creating the model-weights volume,
+and pausing at the right moments for the GitHub App and Cloudflare Tunnel
+steps that have to happen on those sites directly.
+
+Every run after that: GPU tier and model preset are picked once and
+silently reused from then on (`--new` to change them), and everything
+else - the pod, the tunnel, GitHub auth, shutdown - just happens.
+
+See [PREREQUISITES.md](./PREREQUISITES.md) for the itemized list of what
+needs to exist on RunPod, Cloudflare, and GitHub before that first run.
 
 ## Testing
 

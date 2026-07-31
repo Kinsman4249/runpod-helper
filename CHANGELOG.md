@@ -12,3 +12,8 @@
    template, configured for the shell-script build path with the OS
    matrix trimmed to ubuntu-latest, since this project ships bash
    scripts with no platform-specific build step.
+3. Added PREREQUISITES.md as the itemized list of what needs to exist on
+   RunPod, Cloudflare, and GitHub before running startup.sh, and updated
+   README.md to point to it instead of embedding the same list, since
+   startup.sh's setup wizard (see item below) now handles most of what
+   used to require manual setup.
