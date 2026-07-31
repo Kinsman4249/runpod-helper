@@ -146,6 +146,9 @@ setup_network_volume() {
   log_info ""
   log_info "== Step 5: Network volume (persistent model-weights storage) =="
   local vol_name vol_size
+  log_info "Sizing guide: 60GB for 4-bit weights, 100GB for 8-bit or a" \
+           "single fp16 model, 150-200GB to keep both presets or an fp16 +" \
+           "quantized copy side by side. See PREREQUISITES.md for the table."
   read -r -p "Volume name: " vol_name
   read -r -p "Volume size in GB: " vol_size
   [[ -n "$vol_name" && "$vol_size" =~ ^[0-9]+$ ]] || die "Need a name and a numeric size in GB."

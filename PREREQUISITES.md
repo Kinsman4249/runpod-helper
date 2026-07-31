@@ -74,5 +74,36 @@ for the larger model preset), check availability for that card first and
 pick the datacenter accordingly, rather than picking one at random and
 discovering the GPU you want isn't offered there.
 
+### Datacenter choice: privacy
+
+Jurisdiction matters more than physical distance. US and Canadian
+datacenters (`US-*`, `CA-*`) sit under the US CLOUD Act and Five Eyes
+intelligence-sharing, regardless of RunPod's own policies. EU datacenters
+(`EU-*`) are GDPR-bound and outside Five Eyes. Iceland (`EUR-IS-*`) is
+the strongest option in RunPod's list - EEA/GDPR-aligned, non-Five-Eyes,
+and has decent GPU stock (RTX 4090/5090, RTX PRO 6000, occasional H100/
+H200 SXM). If you're in North America, Iceland is still low enough
+latency for interactive SSH/coding-agent use.
+
+### GPU tier and volume size, for this repo's two presets
+
+Sizing based on the dense Qwen3.6-27B and Qwen3-Coder-Next (MoE, ~30B
+total/~3B active) presets this repo ships:
+
+| Precision | Weights (approx, either preset) | GPU tier that fits | Volume size |
+|---|---|---|---|
+| 4-bit (GGUF Q4, default) | ~17-20GB | 24GB card (RTX 4090) | 60GB |
+| 8-bit | ~31-33GB | 32-48GB card | 100GB |
+| fp16 | ~61-65GB | 80GB+ card (RTX PRO 6000, H100/H200) | 100GB |
+| Both presets kept side by side, or fp16 + a quantized copy | - | - | 150-200GB |
+
+`CONTAINER_DISK_GB` in `lib/launch.sh` (currently 25GB) is separate from
+the volume and only needs to hold the OS, `llama.cpp`, and OpenHands -
+model weights always live on the network volume, not the container disk.
+A first-time model download can briefly need close to 2x the weight size
+(source cache + destination copy) unless you download directly to the
+volume path without an intermediate cache, so don't size the volume down
+to the bare minimum.
+
 Once everything above exists, run `./startup.sh`. It detects there's no
 local config yet and walks you through the rest.

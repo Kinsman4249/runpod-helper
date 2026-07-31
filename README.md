@@ -70,7 +70,9 @@ silently reused from then on (`--new` to change them), and everything
 else - the pod, the tunnel, GitHub auth, shutdown - just happens.
 
 See [PREREQUISITES.md](./PREREQUISITES.md) for the itemized list of what
-needs to exist on RunPod, Cloudflare, and GitHub before that first run.
+needs to exist on RunPod, Cloudflare, and GitHub before that first run,
+including datacenter privacy tradeoffs and GPU/volume sizing guidance
+for the two model presets.
 
 ## Testing
 
