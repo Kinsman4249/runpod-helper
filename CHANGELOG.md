@@ -2,6 +2,12 @@
 
 ## Change history
 
+### 0.4.0 - Wizard step back-navigation
+
+1. Added back-out capability to all wizard steps: new `prompt_text()` function in `lib/common.sh` provides free-text input prompts with a safeword (`:b`) that returns 1, allowing the caller to re-run the previous prompt or step. Distinct from menu back-navigation (`'b'` in numbered menus) to avoid conflicts with legitimate text input (e.g., naming a volume "b").
+2. Added `run_step_sequence()` function in `lib/common.sh` to manage ordered wizard steps (2-9) as a back-able sequence: any step can return 1 to hand control back to the previous step instead of the entire wizard needing to restart from the beginning. Steps navigate between their own internal fields using local `field` variables, only returning 1 to request rollback to the prior step.
+3. Refactored all wizard setup functions (`setup_runpod_api_key`, `setup_datacenter`, `setup_network_volume`, `setup_github_app`, `setup_cloudflare_tunnel`, `setup_git_identity`) to use `prompt_text()` and local field-navigation loops, providing consistent back-out behavior across multi-field steps. Users can now edit earlier fields (e.g., go back from volume size to volume name, or from App ID to the prior wizard step) instead of abandoning the entire setup.
+
 ### 0.3.0 - Menu UX refinements and storage resilience
 
 1. Refactored menu helper (`select_from_menu()` in `lib/common.sh`) to support back-navigation: typing `'b'` on any numbered menu (preset, GPU, datacenter) returns to the previous step instead of committing the choice. Restructured preset/GPU selection flow in `lib/launch.sh` as a two-step loop, allowing users to change their preset after seeing available GPUs without re-running the entire script.
