@@ -31,17 +31,23 @@ over.
    domain in Cloudflare, there's nothing for a named Tunnel to attach
    to.
 3. Nothing else ahead of time. The wizard pauses with the exact console
-   steps for creating the named Tunnel and the Access policy, then asks
-   you to paste back the tunnel token.
+   steps for creating the named Tunnel, adding two Public Hostname routes
+   on it (one for SSH -> `localhost:22`, one for the OpenHands UI ->
+   `localhost:<port>`), and setting up an Access policy covering both, then
+   asks you to paste back the SSH hostname and the tunnel token.
 
 ## GitHub
 
 1. Have a GitHub account with access to whichever repos this box should
    be able to push to.
 2. Nothing else ahead of time. The wizard pauses and walks you through
-   creating the GitHub App (which permissions, which repos to install it
-   on, generating and saving the private key), then asks you to confirm
-   the App ID and the key file path.
+   creating the GitHub App (Contents: Read and write, Pull requests: Read
+   and write, installed only on the specific repos this box should touch),
+   generating and downloading its private key, then asks you to confirm the
+   App ID and the key file path. It looks up the installation ID for you
+   automatically (via the `gh-token` extension's `installations` command,
+   using the key you just gave it) rather than asking you to hunt for that
+   number yourself - you just confirm which installation it found.
 
 ## Local machine
 
@@ -51,10 +57,11 @@ over.
    including Bazzite; check with `echo $PATH` if unsure. The wizard
    installs its tools there.
 3. Everything else - `runpodctl`, `gh`, the `gh-token` gh extension, and
-   `cloudflared` - is installed by the wizard as user-level binaries. No
-   `sudo`, no package manager, no reboot. (`cloudflared` is needed
-   locally, not just on the pod: it's what your SSH client proxies
-   through to reach the pod without any open inbound ports.)
+   `cloudflared` - is installed by the wizard as user-level binaries
+   (downloaded release binaries into `~/.local/bin`). No `sudo`, no
+   package manager, no reboot. (`cloudflared` is needed locally, not just
+   on the pod: it's what your SSH client proxies through to reach the pod
+   without any open inbound ports, via `cloudflared access ssh`.)
 
 ## One thing to decide before you start
 

@@ -46,8 +46,16 @@ destroyed every session and nothing long-lived stored on RunPod's side.
 
 ## Status
 
-Scaffold and community-health files only, as of this commit. Scripts
-land as they're built.
+All five scripts (`startup.sh`, `onstart.sh`, `idle-watchdog.sh`,
+`safety-commit.sh`, plus the `lib/` helpers `startup.sh` sources) are
+written and pass `bash -n`. Not yet run against a real pod. One known
+gap: `lib/launch.sh` currently launches a generic RunPod base image
+(`IMAGE_NAME`, clearly marked `TODO` in that file) - the actual
+OpenHands + llama.cpp image is built by a separate, paired setup and
+needs to be swapped in before this is usable end to end. The SSH
+idle-detection method in `idle-watchdog.sh` also hasn't been verified
+against a real cloudflared-proxied session yet - see the caveat comment
+at the top of that file.
 
 ## Setup
 
