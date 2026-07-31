@@ -117,6 +117,17 @@ validate_runpod_api_key() {
     || die "RUNPOD_API_KEY was rejected. Double check it's valid and active, or run 'startup.sh --rotate' to paste a fresh one."
 }
 
+# Cloudflare's dashboard shows the tunnel token embedded in a full install/
+# run command (e.g. Windows: "cloudflared.exe service install eyJh...",
+# Linux/run: "cloudflared tunnel run --token eyJh..."), and it's easy to
+# copy-paste the whole line by habit. The token itself is always base64 of
+# JSON starting with {"a": (account tag), so it always starts with "eyJhIjoi"
+# - extract just that so pasting the full command works as well as the bare
+# token.
+extract_cloudflare_token() {
+  grep -oE 'eyJhIjoi[A-Za-z0-9_+/=-]+' <<< "$1" | head -n1
+}
+
 # No cloudflared subcommand validates a token without actually connecting, so
 # this briefly runs `cloudflared tunnel run` and watches its log for the
 # success line ("Registered tunnel connection") or the rejection line
@@ -128,7 +139,13 @@ validate_cloudflare_tunnel_token() {
   require_cmd cloudflared
   local logfile
   logfile="$(mktemp)"
-  cloudflared tunnel run --token "$CLOUDFLARE_TUNNEL_TOKEN" --loglevel info --logfile "$logfile" \
+  # --loglevel/--logfile are TUNNEL COMMAND options and only take effect
+  # *before* the "run" subcommand (confirmed via `cloudflared tunnel run
+  # --help`, which lists them under "TUNNEL COMMAND OPTIONS" vs. --token
+  # under "SUBCOMMAND OPTIONS") - putting them after "run" silently drops
+  # them, leaving $logfile empty and this check permanently timing out
+  # regardless of whether the token is actually valid.
+  cloudflared tunnel --loglevel info --logfile "$logfile" run --token "$CLOUDFLARE_TUNNEL_TOKEN" \
     >/dev/null 2>&1 &
   local cf_pid=$!
 

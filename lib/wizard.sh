@@ -317,8 +317,9 @@ setup_cloudflare_tunnel() {
         field="token"
         ;;
       token)
-        prompt_text "Paste the tunnel token ($TEXT_BACK_WORD for hostname): " CLOUDFLARE_TUNNEL_TOKEN -s || { field="hostname"; continue; }
-        [[ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]] || die "No tunnel token entered."
+        prompt_text "Paste the tunnel token, or the whole install/run command Cloudflare showed ($TEXT_BACK_WORD for hostname): " CLOUDFLARE_TUNNEL_TOKEN -s || { field="hostname"; continue; }
+        CLOUDFLARE_TUNNEL_TOKEN="$(extract_cloudflare_token "$CLOUDFLARE_TUNNEL_TOKEN")"
+        [[ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]] || die "No tunnel token found in what was pasted."
         validate_cloudflare_tunnel_token
         break
         ;;
@@ -427,9 +428,10 @@ rotate_credentials() {
   log_info "== Cloudflare tunnel token =="
   log_info "Find it on the tunnel's Overview page (Cloudflare dashboard) under 'Install and run a connector'."
   local new_tunnel_token
-  prompt_text "Paste a new tunnel token (blank to keep the current one): " new_tunnel_token -s
+  prompt_text "Paste a new tunnel token, or the whole install/run command (blank to keep the current one): " new_tunnel_token -s
   if [[ -n "$new_tunnel_token" ]]; then
-    CLOUDFLARE_TUNNEL_TOKEN="$new_tunnel_token"
+    CLOUDFLARE_TUNNEL_TOKEN="$(extract_cloudflare_token "$new_tunnel_token")"
+    [[ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]] || die "No tunnel token found in what was pasted."
     validate_cloudflare_tunnel_token
   fi
 
