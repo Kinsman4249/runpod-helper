@@ -90,14 +90,17 @@ setup_runpod_api_key() {
   read -r -s -p "Paste your RunPod API key: " api_key
   echo
   [[ -n "$api_key" ]] || die "No API key entered."
-  runpodctl config --apiKey "$api_key" || die "runpodctl rejected that key."
+  # `runpodctl config --apiKey` is deprecated in current releases and fails
+  # outright (tries to write .runpod.yaml before the directory/file exist).
+  # The CLI's own --help now points at exporting RUNPOD_API_KEY instead, so
+  # we do that and let every later runpodctl call in this script pick it up.
+  export RUNPOD_API_KEY="$api_key"
   # Live validation call - confirmed to exist (runpodctl user / alias me),
   # exact output shape wasn't independently confirmed, so we only check
   # exit status here, not parse the output.
   if ! runpodctl user >/dev/null 2>&1; then
-    die "API key saved to runpodctl's own config but a live call (runpodctl user) failed. Double check the key is valid and active."
+    die "RUNPOD_API_KEY set but a live call (runpodctl user) failed. Double check the key is valid and active."
   fi
-  RUNPOD_API_KEY="$api_key"
   log_ok "RunPod API key validated."
 }
 

@@ -2,6 +2,21 @@
 
 ## Change history
 
+### 0.1.0 - Initial release
+
+1. Added five core lifecycle scripts for pod setup and runtime: `startup.sh`
+   (pod creation and GitHub auth setup), `onstart.sh` (pod boot tasks
+   including Cloudflare Tunnel and idle watchdog startup), `idle-watchdog.sh`
+   (idle session detection and pod lifecycle management), and
+   `safety-commit.sh` (emergency commit to a safety branch before shutdown).
+2. Added setup wizard infrastructure (`lib/wizard.sh`, with `lib/common.sh`
+   and `lib/launch.sh` helpers) to guide first-time users through RunPod API
+   key setup, SSH key registration, model volume creation, and GitHub App
+   integration - all steps required before the first pod launch.
+3. Fixed deprecated `runpodctl config --apiKey` call in wizard by switching
+   to environment variable export (`RUNPOD_API_KEY`), matching the current
+   CLI's documented configuration method.
+
 ### Initial scaffold (round one)
 
 1. Added the community-health files (README, CONTRIBUTING, CODE_OF_CONDUCT,
