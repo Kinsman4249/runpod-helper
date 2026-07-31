@@ -380,21 +380,22 @@ setup_git_identity() {
 write_config() {
   mkdir -p "$CONFIG_DIR"
   # Written with a restrictive umask for the duration of this call so the
-  # file is never briefly world-readable between creation and chmod.
+  # file is never briefly world-readable between creation and chmod, and
+  # %q-quoted so a value containing spaces or shell metacharacters (e.g. a
+  # GITHUB_APP_KEY_PATH through a directory with a space in its name) can't
+  # break `source "$CONFIG_FILE"` later.
   ( umask 077
-    cat > "$CONFIG_FILE" <<EOF
-RUNPOD_API_KEY=$RUNPOD_API_KEY
-SSH_KEY_PATH=$SSH_KEY_PATH
-DATACENTER_ID=$DATACENTER_ID
-NETWORK_VOLUME_ID=$NETWORK_VOLUME_ID
-GITHUB_APP_ID=$GITHUB_APP_ID
-GITHUB_APP_KEY_PATH=$GITHUB_APP_KEY_PATH
-GITHUB_APP_INSTALLATION_ID=$GITHUB_APP_INSTALLATION_ID
-CLOUDFLARE_SSH_HOSTNAME=$CLOUDFLARE_SSH_HOSTNAME
-CLOUDFLARE_TUNNEL_TOKEN=$CLOUDFLARE_TUNNEL_TOKEN
-GIT_USER_NAME=$GIT_USER_NAME
-GIT_USER_EMAIL=$GIT_USER_EMAIL
-EOF
+    printf 'RUNPOD_API_KEY=%q\n' "$RUNPOD_API_KEY" > "$CONFIG_FILE"
+    printf 'SSH_KEY_PATH=%q\n' "$SSH_KEY_PATH" >> "$CONFIG_FILE"
+    printf 'DATACENTER_ID=%q\n' "$DATACENTER_ID" >> "$CONFIG_FILE"
+    printf 'NETWORK_VOLUME_ID=%q\n' "$NETWORK_VOLUME_ID" >> "$CONFIG_FILE"
+    printf 'GITHUB_APP_ID=%q\n' "$GITHUB_APP_ID" >> "$CONFIG_FILE"
+    printf 'GITHUB_APP_KEY_PATH=%q\n' "$GITHUB_APP_KEY_PATH" >> "$CONFIG_FILE"
+    printf 'GITHUB_APP_INSTALLATION_ID=%q\n' "$GITHUB_APP_INSTALLATION_ID" >> "$CONFIG_FILE"
+    printf 'CLOUDFLARE_SSH_HOSTNAME=%q\n' "$CLOUDFLARE_SSH_HOSTNAME" >> "$CONFIG_FILE"
+    printf 'CLOUDFLARE_TUNNEL_TOKEN=%q\n' "$CLOUDFLARE_TUNNEL_TOKEN" >> "$CONFIG_FILE"
+    printf 'GIT_USER_NAME=%q\n' "$GIT_USER_NAME" >> "$CONFIG_FILE"
+    printf 'GIT_USER_EMAIL=%q\n' "$GIT_USER_EMAIL" >> "$CONFIG_FILE"
   )
   chmod 600 "$CONFIG_FILE"
   # Confirm by presence/length only - never echo the values themselves.
