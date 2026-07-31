@@ -58,6 +58,13 @@ over.
    attached to them - if either is missing the badge, go back and fix
    that hostname's Access application before continuing.
 
+   Direct links, once you know your account ID and tunnel ID (both appear
+   in the address bar once you're on the relevant page - swap them into
+   the placeholders below to jump straight there next time instead of
+   digging through the dashboard nav):
+     - Tunnel overview (token, routes): `https://dash.cloudflare.com/<account-id>/tunnels/<tunnel-id>/overview`
+     - Access policies: `https://dash.cloudflare.com/<account-id>/one/access-controls/policies`
+
    Port 3000 is fixed regardless of which frontend you pick at launch
    (`openhands` / `llama-webui` / `open-webui`, see `lib/launch.sh`'s
    `pick_preset_and_gpu()`) - `image/entrypoint.sh` always binds whichever
