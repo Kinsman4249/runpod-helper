@@ -168,11 +168,13 @@ maybe_run_prewarm() {
   local env_json create_output prewarm_pod_id
   env_json=$(printf '{"PREWARM_ONLY":"1","MODEL_PRESET":"%s"}' "$MODEL_PRESET")
 
-  # --computeType/--vcpu/--mem confirmed against `runpodctl create pod --help`
-  # output (2026-07-31) - CPU pods take no --gpuType/--gpuId at all.
+  # --compute-type confirmed against a live `runpodctl pod create` call
+  # (2026-07-31, pod id 4xfim5k1etd6xs) - CPU pods take no --gpu-id, and
+  # there's no --vcpu/--mem flag at all (unlike the deprecated top-level
+  # `runpodctl create pod` alias, which has different, camelCase flag names -
+  # don't confuse the two). Defaults to 2 vcpu/4GB mem, $0.06/hr in EUR-IS-1.
   create_output="$(runpodctl pod create \
-    --computeType CPU \
-    --vcpu 4 --mem 8 \
+    --compute-type CPU \
     --image "$IMAGE_NAME" \
     --network-volume-id "$NETWORK_VOLUME_ID" \
     --volume-mount-path /workspace/persistent \
@@ -317,6 +319,13 @@ run_normal_launch() {
   ensure_network_volume
   pick_preset_and_gpu
   maybe_run_prewarm
+
+  if [[ "${PREWARM_ONLY:-0}" == 1 ]]; then
+    log_info ""
+    log_ok "Prewarm-only run done - no GPU pod created. Launch normally when you're ready."
+    return
+  fi
+
   create_pod
   wait_for_pod_ready
   push_github_token

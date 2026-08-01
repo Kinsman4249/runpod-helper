@@ -24,8 +24,13 @@ FROM ghcr.io/ggml-org/llama.cpp:server-cuda
 # it. curl/ca-certificates are all this image needs to bootstrap that at
 # runtime; git is needed directly in-image for safety-commit.sh.
 ENV DEBIAN_FRONTEND=noninteractive
+# openssh-server: RunPod does NOT start sshd for you on a custom image -
+# confirmed against docs.runpod.io/pods/configuration/use-ssh (2026-08-01),
+# which explicitly says a custom template must install and start it itself.
+# Installed at build time (small, stable, no reason to defer to the
+# volume-cached runtime installs below); entrypoint.sh starts it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates git \
+      curl ca-certificates git openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
 # --- this repo's scripts -----------------------------------------------------

@@ -20,6 +20,25 @@ BIN_DIR="$PERSIST_DIR/bin"
 MODEL_DIR="$PERSIST_DIR/models/${MODEL_PRESET:?MODEL_PRESET not set}"
 mkdir -p "$RUN_DIR" "$MODEL_DIR" "$TOOLS_DIR" "$BIN_DIR"
 
+# --- sshd ---------------------------------------------------------------
+# RunPod does NOT start sshd for a custom image on its own (confirmed
+# against docs.runpod.io/pods/configuration/use-ssh, 2026-08-01 - a custom
+# template is explicitly required to install and start it itself). Without
+# this, wait_for_pod_ready()'s SSH check and push_github_token() in
+# lib/launch.sh would hang/fail on every launch, GPU or CPU. $PUBLIC_KEY is
+# populated automatically by RunPod for any pod created with SSH enabled
+# (confirmed live in a pod's own `env` block) - no local wizard step needed
+# for it. Started unconditionally, even under PREWARM_ONLY, so a prewarm
+# pod is reachable for diagnostics via `runpodctl ssh info <pod-id>`.
+mkdir -p /run/sshd "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+if [[ -n "${PUBLIC_KEY:-}" ]]; then
+  echo "$PUBLIC_KEY" >> "$HOME/.ssh/authorized_keys"
+  chmod 600 "$HOME/.ssh/authorized_keys"
+fi
+ssh-keygen -A >/dev/null
+/usr/sbin/sshd
+
 # --- toolchain lives on the network volume, not this image ------------------
 # gh, cloudflared, uv itself, and everything uv installs (Python
 # interpreters, OpenHands, Open WebUI) all get written under $PERSIST_DIR so
