@@ -37,7 +37,17 @@ if [[ -n "${PUBLIC_KEY:-}" ]]; then
   chmod 600 "$HOME/.ssh/authorized_keys"
 fi
 ssh-keygen -A >/dev/null
-/usr/sbin/sshd
+# `service ssh start` (not a raw `/usr/sbin/sshd` invocation) is RunPod's own
+# documented snippet for this exact situation (docs.runpod.io/pods/configuration/use-ssh).
+# Non-fatal on purpose: this whole script is PID 1 under `set -euo pipefail` -
+# a raw `sshd` failing (e.g. a PAM quirk in a minimal apt install) exits
+# non-zero in the foreground before it forks, which would kill PID 1 and the
+# entire container with it, restarting in an silent loop with no way to
+# diagnose it (confirmed live 2026-08-01: exactly this happened - pod stuck
+# at uptimeSeconds=0 indefinitely, SSH connection refused every time). SSH
+# not coming up is a real problem worth surfacing, but it shouldn't take the
+# whole pod down with it.
+service ssh start || echo "WARNING: sshd failed to start - SSH access to this pod will not work. Continuing anyway." >&2
 
 # --- toolchain lives on the network volume, not this image ------------------
 # gh, cloudflared, uv itself, and everything uv installs (Python
