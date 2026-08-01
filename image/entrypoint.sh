@@ -1,23 +1,93 @@
 #!/usr/bin/env bash
-# entrypoint.sh - the image's CMD. Runs before onstart.sh on every boot:
-# gets the model weights + inference backend + chosen frontend up first,
-# then hands off to onstart.sh (baked in at image build time, see
-# Dockerfile) for cloudflared + the idle watchdog. Not fetched from GitHub
-# at runtime like idle-watchdog.sh/safety-commit.sh are - this file only
-# exists inside the image.
+# entrypoint.sh - the image's ENTRYPOINT. Runs before onstart.sh on every
+# boot: gets the toolchain, model weights, and inference backend + chosen
+# frontend up first, then hands off to onstart.sh (baked in at image build
+# time, see Dockerfile) for cloudflared + the idle watchdog. Not fetched
+# from GitHub at runtime like idle-watchdog.sh/safety-commit.sh are - this
+# file only exists inside the image.
+#
+# PREWARM_ONLY=1 short-circuits this into a tools+model-download-only run
+# with no llama-server, no frontend, no onstart.sh handoff - see
+# ensure_tools() and maybe_run_prewarm() in ../lib/launch.sh. The point is
+# a cheap CPU pod can pay for that download time instead of an expensive
+# GPU pod sitting idle while it happens.
 set -euo pipefail
 
 RUN_DIR="/run/runpod-lab"
-MODEL_DIR="/workspace/persistent/models/${MODEL_PRESET:?MODEL_PRESET not set}"
-mkdir -p "$RUN_DIR" "$MODEL_DIR"
+PERSIST_DIR="/workspace/persistent"
+TOOLS_DIR="$PERSIST_DIR/tools"
+BIN_DIR="$PERSIST_DIR/bin"
+MODEL_DIR="$PERSIST_DIR/models/${MODEL_PRESET:?MODEL_PRESET not set}"
+mkdir -p "$RUN_DIR" "$MODEL_DIR" "$TOOLS_DIR" "$BIN_DIR"
 
-# shellcheck source=presets.conf
-source /opt/runpod-lab/presets.conf
-MODEL_PATH="$MODEL_DIR/$HF_FILE"
+# --- toolchain lives on the network volume, not this image ------------------
+# gh, cloudflared, uv itself, and everything uv installs (Python
+# interpreters, OpenHands, Open WebUI) all get written under $PERSIST_DIR so
+# they survive pod deletion and are shared across every pod that mounts this
+# volume - installed once, not once per image pull. See Dockerfile's comment
+# on why this moved out of build time.
+export PATH="$BIN_DIR:$PATH"
+export UV_INSTALL_DIR="$BIN_DIR"
+export UV_TOOL_DIR="$TOOLS_DIR/uv-tools"
+export UV_TOOL_BIN_DIR="$BIN_DIR"
+export UV_PYTHON_INSTALL_DIR="$TOOLS_DIR/uv-python"
+
+# Idempotent by design (every step is a `command -v` guard) so it's cheap to
+# call on every boot as a fallback, not just from the dedicated prewarm run -
+# if maybe_run_prewarm() was skipped or never run, a normal launch still
+# works, it just pays for the install time on the GPU pod instead.
+ensure_tools() {
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "Installing gh to $BIN_DIR..."
+    local gh_url tmp_dir
+    gh_url="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest \
+      | grep -o '"browser_download_url": *"[^"]*linux_amd64\.tar\.gz"' \
+      | sed -E 's/.*"(https[^"]+)"/\1/' | head -n1)"
+    tmp_dir="$(mktemp -d)"
+    curl -fsSL "$gh_url" -o "$tmp_dir/gh.tar.gz"
+    tar -xzf "$tmp_dir/gh.tar.gz" -C "$tmp_dir"
+    install -m 755 "$(find "$tmp_dir" -type f -name gh -perm -u+x | head -n1)" "$BIN_DIR/gh"
+    rm -rf "$tmp_dir"
+  fi
+
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    echo "Installing cloudflared to $BIN_DIR..."
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
+      -o "$BIN_DIR/cloudflared"
+    chmod +x "$BIN_DIR/cloudflared"
+  fi
+
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "Installing uv to $BIN_DIR..."
+    # UV_INSTALL_DIR is the installer's own documented override
+    # (docs.astral.sh/uv/reference/installer, confirmed 2026-07-31) - exported
+    # above, so no separate --install-dir flag needed here.
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+  fi
+
+  # Both frontends installed regardless of this boot's $FRONTEND choice -
+  # the whole point of prewarming is covering every frontend switch a future
+  # launch might make, not just today's pick.
+  if ! command -v openhands >/dev/null 2>&1; then
+    echo "Installing OpenHands (uv tool)..."
+    uv tool install openhands --python 3.12
+  fi
+  if ! command -v open-webui >/dev/null 2>&1; then
+    echo "Installing Open WebUI (uv tool)..."
+    uv tool install open-webui --python 3.12
+  fi
+}
+
+echo "Ensuring toolchain is present on the network volume..."
+ensure_tools
 
 # --- model weights: download straight to the network volume if missing ----
 # Streaming curl directly to the destination path (no /tmp cache hop) is
 # the "don't need 2x the weight size" approach PREREQUISITES.md calls out.
+# shellcheck source=presets.conf
+source /opt/runpod-lab/presets.conf
+MODEL_PATH="$MODEL_DIR/$HF_FILE"
+
 if [[ ! -f "$MODEL_PATH" ]]; then
   echo "Downloading $HF_FILE from $HF_REPO (first boot with this preset)..."
   curl -fL --retry 3 --retry-delay 5 \
@@ -26,6 +96,11 @@ if [[ ! -f "$MODEL_PATH" ]]; then
   mv "$MODEL_PATH.partial" "$MODEL_PATH"
 else
   echo "Model weights already on the volume: $MODEL_PATH"
+fi
+
+if [[ "${PREWARM_ONLY:-0}" == 1 ]]; then
+  echo "PREWARM_ONLY set - toolchain and model weights are in place. Not starting llama-server, any frontend, or onstart.sh."
+  exit 0
 fi
 
 # --- inference backend: llama-server ----------------------------------------

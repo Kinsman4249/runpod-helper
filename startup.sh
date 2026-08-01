@@ -20,17 +20,20 @@ source "$SCRIPT_DIR/lib/launch.sh"
 SETUP=0
 ROTATE=0
 NEW_SESSION=0
+FORCE_PREWARM=0
 IDLE_MINUTES=20
 MAX_RUNTIME_HOURS=4
 
 usage() {
   cat <<EOF
-Usage: $0 [--setup] [--rotate] [--new] [--idle-minutes N] [--max-runtime-hours N]
+Usage: $0 [--setup] [--rotate] [--new] [--prewarm] [--idle-minutes N] [--max-runtime-hours N]
 
   --setup                 Force the first-run setup wizard, even if config exists.
   --rotate                Re-paste the RunPod API key and/or Cloudflare tunnel token
                            (whichever got rotated) without redoing the rest of setup.
   --new                   Re-pick GPU/model preset instead of reusing the last session.
+  --prewarm                Force a toolchain/model prewarm run on a cheap CPU pod even if
+                           this volume is already marked prewarmed (see lib/launch.sh).
   --idle-minutes N        Minutes with no SSH session before the pod auto-shuts-down (default 20).
   --max-runtime-hours N   Hard wall-clock cap on the pod's lifetime, regardless of activity (default 4).
 EOF
@@ -41,6 +44,7 @@ while (( $# > 0 )); do
     --setup) SETUP=1 ;;
     --rotate) ROTATE=1 ;;
     --new) NEW_SESSION=1 ;;
+    --prewarm) FORCE_PREWARM=1 ;;
     --idle-minutes) IDLE_MINUTES="$2"; shift ;;
     --max-runtime-hours) MAX_RUNTIME_HOURS="$2"; shift ;;
     -h|--help) usage; exit 0 ;;

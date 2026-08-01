@@ -12,38 +12,21 @@
 # loudly right away, not silently.
 FROM ghcr.io/ggml-org/llama.cpp:server-cuda
 
+# Deliberately minimal: gh, cloudflared, uv, and the uv-managed Python +
+# OpenHands/Open WebUI tool environments all used to be installed here at
+# build time, making every image pull slow and re-downloading the same
+# multi-GB toolchain on every rebuild. They're now installed at container
+# *runtime* by entrypoint.sh's ensure_tools(), straight onto the network
+# volume (/workspace/persistent) instead of this image's disposable
+# container-disk layer - so they're downloaded once per volume, not once
+# per image pull, and a cheap CPU pod can do that work up front (see
+# maybe_run_prewarm() in ../lib/launch.sh) instead of paying GPU rates for
+# it. curl/ca-certificates are all this image needs to bootstrap that at
+# runtime; git is needed directly in-image for safety-commit.sh.
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates python3 python3-pip python3-venv \
+      curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
-
-# --- uv + Python-based frontends --------------------------------------------
-# uv's official installer (astral.sh) - same tool OpenHands' own docs assume
-# (docs.openhands.dev/openhands/usage/run-openhands/local-setup, confirmed
-# 2026-07-30: "uv tool install openhands --python 3.12").
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
-
-RUN uv tool install openhands --python 3.12 \
-    && uv tool install open-webui --python 3.12
-
-# --- gh CLI and cloudflared --------------------------------------------------
-# Same install steps as ../onstart.sh's own gh/cloudflared blocks, kept
-# side by side deliberately so the two don't drift apart - the difference
-# here is WHEN they run (image build time, once) vs there (every boot, as a
-# no-op once already present).
-RUN gh_url="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest \
-      | grep -o '"browser_download_url": *"[^"]*linux_amd64\.tar\.gz"' \
-      | sed -E 's/.*"(https[^"]+)"/\1/' | head -n1)" \
-    && tmp_dir="$(mktemp -d)" \
-    && curl -fsSL "$gh_url" -o "$tmp_dir/gh.tar.gz" \
-    && tar -xzf "$tmp_dir/gh.tar.gz" -C "$tmp_dir" \
-    && install -m 755 "$(find "$tmp_dir" -type f -name gh -perm -u+x | head -n1)" /usr/local/bin/gh \
-    && rm -rf "$tmp_dir"
-
-RUN curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
-      -o /usr/local/bin/cloudflared \
-    && chmod +x /usr/local/bin/cloudflared
 
 # --- this repo's scripts -----------------------------------------------------
 RUN mkdir -p /opt/runpod-lab /run/runpod-lab

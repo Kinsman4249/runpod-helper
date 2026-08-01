@@ -147,6 +147,69 @@ ensure_network_volume() {
   log_ok "Saved new NETWORK_VOLUME_ID to $CONFIG_FILE."
 }
 
+# --- prewarm: toolchain + model download on a cheap CPU pod -----------------
+
+# CPU pods are billed at a small fraction of GPU rates (RunPod pricing, not
+# independently re-quoted here - check https://www.runpod.io/console/gpu-cloud
+# for current CPU pod rates). Running the multi-GB toolchain install and
+# model download on one of these instead of the GPU pod means you're not
+# paying GPU-hour rates for pure network/CPU-bound work. Both pods mount the
+# same network volume at the same path (/workspace/persistent), so anything
+# written here is immediately visible to the GPU pod that launches after it.
+maybe_run_prewarm() {
+  if [[ "${FORCE_PREWARM:-0}" != 1 && "${PREWARMED_VOLUME_ID:-}" == "$NETWORK_VOLUME_ID" ]]; then
+    log_info "Volume already prewarmed (toolchain cached) - skipping. Pass --prewarm to force a re-run."
+    return
+  fi
+
+  log_info ""
+  log_info "Prewarming network volume: installing gh/cloudflared/uv/OpenHands/Open WebUI and downloading $MODEL_PRESET weights on a cheap CPU pod..."
+
+  local env_json create_output prewarm_pod_id
+  env_json=$(printf '{"PREWARM_ONLY":"1","MODEL_PRESET":"%s"}' "$MODEL_PRESET")
+
+  # --computeType/--vcpu/--mem confirmed against `runpodctl create pod --help`
+  # output (2026-07-31) - CPU pods take no --gpuType/--gpuId at all.
+  create_output="$(runpodctl pod create \
+    --computeType CPU \
+    --vcpu 4 --mem 8 \
+    --image "$IMAGE_NAME" \
+    --network-volume-id "$NETWORK_VOLUME_ID" \
+    --volume-mount-path /workspace/persistent \
+    --container-disk-in-gb 10 \
+    --name "runpod-lab-prewarm-$(date +%s)" \
+    --env "$env_json")" || die "Prewarm pod creation failed. Raw output:\n$create_output"
+
+  prewarm_pod_id="$(jq -r '.id // empty' <<< "$create_output")"
+  [[ -n "$prewarm_pod_id" ]] || die "Prewarm pod created but no id found in the response: $create_output"
+  log_ok "Prewarm pod created: $prewarm_pod_id"
+
+  # A stuck prewarm pod is still real money (if not much) - clean it up on
+  # every exit path out of this function, not just the happy one.
+  trap 'runpodctl pod stop "'"$prewarm_pod_id"'" >/dev/null 2>&1; runpodctl pod delete "'"$prewarm_pod_id"'" >/dev/null 2>&1' RETURN
+
+  # NOT independently confirmed against a live run: this assumes the pod's
+  # status leaves "running" once entrypoint.sh's PREWARM_ONLY branch exits 0
+  # (i.e. RunPod doesn't auto-restart the container). If that assumption is
+  # wrong, this just runs to max_wait and stops the pod anyway below - see
+  # handoff.md.
+  log_info "Waiting for prewarm to finish (installs + model download can take a while on first run)..."
+  local waited=0 max_wait=3600
+  while (( waited < max_wait )); do
+    runpodctl pod get "$prewarm_pod_id" 2>/dev/null | grep -qi running || break
+    sleep 15; waited=$((waited + 15))
+  done
+
+  if (( waited >= max_wait )); then
+    log_warn "Prewarm pod still reports running after ${max_wait}s - stopping it now regardless. Toolchain/model may be incomplete; the GPU pod will finish the job itself if so, or rerun with --prewarm later."
+    return
+  fi
+
+  log_ok "Prewarm finished."
+  sed -i '/^PREWARMED_VOLUME_ID=/d' "$CONFIG_FILE"
+  printf 'PREWARMED_VOLUME_ID=%q\n' "$NETWORK_VOLUME_ID" >> "$CONFIG_FILE"
+}
+
 # --- pod creation ------------------------------------------------------------
 
 create_pod() {
@@ -253,6 +316,7 @@ push_github_token() {
 run_normal_launch() {
   ensure_network_volume
   pick_preset_and_gpu
+  maybe_run_prewarm
   create_pod
   wait_for_pod_ready
   push_github_token

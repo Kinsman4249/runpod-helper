@@ -10,12 +10,13 @@
 # exists in this pod - see the "no gh auth login here" note below.)
 set -euo pipefail
 
-RUNPOD_LAB_BUILD="2026.07.30"
+RUNPOD_LAB_BUILD="2026.07.31"
 REPO_RAW_BASE="https://raw.githubusercontent.com/Kinsman4249/runpod-helper/main"
 RUN_DIR="/run/runpod-lab"
 SCRIPT_DIR="/opt/runpod-lab"
+BIN_DIR="/workspace/persistent/bin"
 
-mkdir -p "$RUN_DIR" "$SCRIPT_DIR"
+mkdir -p "$RUN_DIR" "$SCRIPT_DIR" "$BIN_DIR"
 echo "onstart.sh build $RUNPOD_LAB_BUILD starting."
 
 # --- gh CLI (installed, but deliberately NOT authenticated here) -----------
@@ -24,6 +25,14 @@ echo "onstart.sh build $RUNPOD_LAB_BUILD starting."
 # arrives later, pushed over SSH from the local machine once the tunnel is
 # confirmed reachable. An unauthenticated `gh` on the pod at this point is
 # expected, not a bug; don't "fix" this by adding gh auth login here.
+#
+# Normally already present: entrypoint.sh's ensure_tools() installs gh to
+# $BIN_DIR before this script ever runs, and exports $BIN_DIR onto PATH
+# (inherited here via entrypoint.sh's `exec`), so `command -v gh` below
+# usually finds it immediately. This block is the fallback for a pod that
+# skipped/never ran the prewarm step - installs straight to $BIN_DIR (not
+# the old /usr/local/bin) so it persists on the network volume for next
+# time instead of being re-downloaded on every boot.
 if ! command -v gh >/dev/null 2>&1; then
   echo "Installing gh..."
   gh_url="$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest \
@@ -32,7 +41,7 @@ if ! command -v gh >/dev/null 2>&1; then
   tmp_dir="$(mktemp -d)"
   curl -fsSL "$gh_url" -o "$tmp_dir/gh.tar.gz"
   tar -xzf "$tmp_dir/gh.tar.gz" -C "$tmp_dir"
-  install -m 755 "$(find "$tmp_dir" -type f -name gh -perm -u+x | head -n1)" /usr/local/bin/gh
+  install -m 755 "$(find "$tmp_dir" -type f -name gh -perm -u+x | head -n1)" "$BIN_DIR/gh"
   rm -rf "$tmp_dir"
 fi
 
@@ -47,11 +56,12 @@ git config --global user.email "${GIT_USER_EMAIL:?GIT_USER_EMAIL not set}"
 # local config.yml - confirmed that token-based "cloudflared tunnel run"
 # picks up dashboard-defined routes automatically, so no local ingress file
 # is needed here.
+# Same "usually already there via ensure_tools()" situation as gh above.
 if ! command -v cloudflared >/dev/null 2>&1; then
   echo "Installing cloudflared..."
   curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
-    -o /usr/local/bin/cloudflared
-  chmod +x /usr/local/bin/cloudflared
+    -o "$BIN_DIR/cloudflared"
+  chmod +x "$BIN_DIR/cloudflared"
 fi
 
 if [[ -f "$RUN_DIR/cloudflared.pid" ]] && kill -0 "$(cat "$RUN_DIR/cloudflared.pid")" 2>/dev/null; then
