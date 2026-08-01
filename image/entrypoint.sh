@@ -160,8 +160,14 @@ else
   LLAMA_PORT=8081
 fi
 
+# Absolute path, not a bare `llama-server` PATH lookup - confirmed live
+# 2026-08-01 that the base image's own ENTRYPOINT invokes it by absolute
+# path (/app/llama-server) and never actually puts /app on $PATH, so a bare
+# `nohup llama-server ...` here failed instantly with "No such file or
+# directory" on every boot. entrypoint.sh's own PATH export above only adds
+# $BIN_DIR, which doesn't help.
 echo "Starting llama-server ($MODEL_PRESET, port $LLAMA_PORT)..."
-nohup llama-server \
+nohup /app/llama-server \
   --model "$MODEL_PATH" \
   --host 127.0.0.1 --port "$LLAMA_PORT" \
   "${LLAMA_EXTRA_ARGS[@]}" \
