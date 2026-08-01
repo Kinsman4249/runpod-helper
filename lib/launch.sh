@@ -206,8 +206,18 @@ maybe_run_prewarm() {
   # means the `pod get` call itself starts erroring (pod no longer exists) -
   # that's the real signal, not the status text. The still-running check
   # stays as a secondary signal in case self-termination didn't fire.
+  #
+  # BUT: "pod get errors / not running" also happens if the pod never
+  # actually started (image pull failure, capacity/scheduling problem) and
+  # RunPod cleans it up on its own - confirmed live 2026-08-01, a prewarm
+  # pod vanished (404 on `pod get`) within ~20-30s, and this loop reported
+  # "Prewarm finished" even though the volume had no toolchain or model on
+  # it at all. gh/cloudflared/uv installs plus a multi-GB model download
+  # cannot genuinely finish that fast, so MIN_PREWARM_SECONDS below is a
+  # floor: disappearing before it elapses is treated as a failure, not
+  # success, same as the max_wait timeout branch already does.
   log_info "Waiting for prewarm to finish (installs + model download can take a while on first run)..."
-  local waited=0 max_wait=3600 get_output
+  local waited=0 max_wait=3600 min_wait=120 get_output
   while (( waited < max_wait )); do
     get_output="$(runpodctl pod get "$prewarm_pod_id" 2>&1)"
     { grep -qi '"error"' <<< "$get_output" || ! grep -qi running <<< "$get_output"; } && break
@@ -216,6 +226,11 @@ maybe_run_prewarm() {
 
   if (( waited >= max_wait )); then
     log_warn "Prewarm pod still reports running after ${max_wait}s - stopping it now regardless. Toolchain/model may be incomplete; the GPU pod will finish the job itself if so, or rerun with --prewarm later."
+    return
+  fi
+
+  if (( waited < min_wait )); then
+    log_warn "Prewarm pod disappeared after only ${waited}s - too fast to be a genuine finish (installs + model download take much longer). Likely a scheduling/image-pull failure, not success. Not marking this volume as prewarmed; the GPU pod will do the install itself, or rerun with --prewarm after checking the console."
     return
   fi
 

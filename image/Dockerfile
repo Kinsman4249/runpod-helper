@@ -29,8 +29,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 # which explicitly says a custom template must install and start it itself.
 # Installed at build time (small, stable, no reason to defer to the
 # volume-cached runtime installs below); entrypoint.sh starts it.
+# `time` (GNU time, /usr/bin/time) is NOT the same as bash's builtin `time` -
+# only the builtin ships by default, and it doesn't support -v or work the
+# same way under command substitution. Confirmed missing live (2026-08-01)
+# when a benchmark script's `/usr/bin/time -v cp ...` lines failed silently
+# (command not found) before the copy even ran. Small and stable, installed
+# at build time like the rest of this list.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl ca-certificates git openssh-server \
+      curl ca-certificates git openssh-server time \
     && rm -rf /var/lib/apt/lists/*
 
 # runpodctl itself - idle-watchdog.sh's self stop/delete and entrypoint.sh's
