@@ -165,8 +165,11 @@ maybe_run_prewarm() {
   log_info ""
   log_info "Prewarming network volume: installing gh/cloudflared/uv/OpenHands/Open WebUI and downloading $MODEL_PRESET weights on a cheap CPU pod..."
 
+  # RUNPOD_API_KEY is needed so entrypoint.sh's PREWARM_ONLY branch can
+  # self-terminate this pod via runpodctl once it's done - see the big
+  # comment on the wait loop below for why that's not optional.
   local env_json create_output prewarm_pod_id
-  env_json=$(printf '{"PREWARM_ONLY":"1","MODEL_PRESET":"%s"}' "$MODEL_PRESET")
+  env_json=$(printf '{"PREWARM_ONLY":"1","MODEL_PRESET":"%s","RUNPOD_API_KEY":"%s"}' "$MODEL_PRESET" "$RUNPOD_API_KEY")
 
   # --compute-type confirmed against a live `runpodctl pod create` call
   # (2026-07-31, pod id 4xfim5k1etd6xs) - CPU pods take no --gpu-id, and
@@ -190,15 +193,20 @@ maybe_run_prewarm() {
   # every exit path out of this function, not just the happy one.
   trap 'runpodctl pod stop "'"$prewarm_pod_id"'" >/dev/null 2>&1; runpodctl pod delete "'"$prewarm_pod_id"'" >/dev/null 2>&1' RETURN
 
-  # NOT independently confirmed against a live run: this assumes the pod's
-  # status leaves "running" once entrypoint.sh's PREWARM_ONLY branch exits 0
-  # (i.e. RunPod doesn't auto-restart the container). If that assumption is
-  # wrong, this just runs to max_wait and stops the pod anyway below - see
-  # handoff.md.
+  # Confirmed live (2026-08-01): RunPod restarts a pod's container on ANY
+  # exit, including a clean `exit 0` - polling for status to merely leave
+  # "running" never works, since a pod that just finishes and exits gets
+  # immediately relaunched by RunPod itself and looks "running" forever.
+  # entrypoint.sh's PREWARM_ONLY branch now self-terminates via runpodctl
+  # once it's done (needs $RUNPOD_API_KEY, passed above), so completion here
+  # means the `pod get` call itself starts erroring (pod no longer exists) -
+  # that's the real signal, not the status text. The still-running check
+  # stays as a secondary signal in case self-termination didn't fire.
   log_info "Waiting for prewarm to finish (installs + model download can take a while on first run)..."
-  local waited=0 max_wait=3600
+  local waited=0 max_wait=3600 get_output
   while (( waited < max_wait )); do
-    runpodctl pod get "$prewarm_pod_id" 2>/dev/null | grep -qi running || break
+    get_output="$(runpodctl pod get "$prewarm_pod_id" 2>&1)"
+    { grep -qi '"error"' <<< "$get_output" || ! grep -qi running <<< "$get_output"; } && break
     sleep 15; waited=$((waited + 15))
   done
 

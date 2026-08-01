@@ -33,6 +33,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates git openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
+# runpodctl itself - idle-watchdog.sh's self stop/delete and entrypoint.sh's
+# PREWARM_ONLY self-termination both call it, but nothing was ever actually
+# installing it inside the pod (confirmed missing live, 2026-08-01 - this
+# would have silently broken the idle-shutdown safety mechanism on its very
+# first real trigger). Install command confirmed against
+# docs.runpod.io/runpodctl/install-runpodctl (2026-08-01, curl in place of
+# their documented wget - same binary, this image already has curl).
+RUN curl -fsSL https://github.com/runpod/runpodctl/releases/latest/download/runpodctl-linux-amd64 \
+      -o /usr/local/bin/runpodctl \
+    && chmod +x /usr/local/bin/runpodctl
+
 # --- this repo's scripts -----------------------------------------------------
 RUN mkdir -p /opt/runpod-lab /run/runpod-lab
 

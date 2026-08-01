@@ -129,6 +129,21 @@ fi
 
 if [[ "${PREWARM_ONLY:-0}" == 1 ]]; then
   echo "PREWARM_ONLY set - toolchain and model weights are in place. Not starting llama-server, any frontend, or onstart.sh."
+  # Self-terminate rather than just exit - confirmed live (2026-08-01) that
+  # RunPod restarts a pod's container on ANY exit, including a clean exit 0,
+  # so without this the pod just loops entrypoint.sh forever and keeps
+  # billing. $RUNPOD_POD_ID is RunPod's own auto-injected env var (same one
+  # idle-watchdog.sh's shutdown_pod() already relies on); $RUNPOD_API_KEY is
+  # passed in by maybe_run_prewarm()'s --env, same as the normal GPU pod
+  # gets. If either is missing, fall through to plain exit 0 and let
+  # maybe_run_prewarm()'s own stop/delete (its trap) be the backstop.
+  if [[ -n "${RUNPOD_POD_ID:-}" && -n "${RUNPOD_API_KEY:-}" ]]; then
+    echo "Self-terminating this prewarm pod ($RUNPOD_POD_ID)..."
+    runpodctl pod stop "$RUNPOD_POD_ID" || echo "WARNING: pod stop failed - relying on the local machine's cleanup instead." >&2
+    runpodctl pod delete "$RUNPOD_POD_ID" || echo "WARNING: pod delete failed - relying on the local machine's cleanup instead." >&2
+  else
+    echo "WARNING: RUNPOD_POD_ID or RUNPOD_API_KEY not set - cannot self-terminate. Relying on the local machine's cleanup instead." >&2
+  fi
   exit 0
 fi
 
