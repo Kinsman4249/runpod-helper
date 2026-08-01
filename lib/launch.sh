@@ -216,11 +216,27 @@ maybe_run_prewarm() {
   # cannot genuinely finish that fast, so MIN_PREWARM_SECONDS below is a
   # floor: disappearing before it elapses is treated as a failure, not
   # success, same as the max_wait timeout branch already does.
+  #
+  # The completion check itself also used to grep the raw JSON for the
+  # substring '"error"' - wrong, because `pod get`'s response nests
+  # {"ssh": {"error": "pod not ready", ...}} for as long as SSH isn't up
+  # yet, completely unrelated to whether the pod itself is fine. Confirmed
+  # live 2026-08-01: a pod stuck at uptimeSeconds=0 for 18+ minutes (never
+  # actually coming up, no ssh.ip ever assigned) tripped this on its nested
+  # ssh.error field alone and would have been misread as "finished" once
+  # past min_wait, despite still being alive and having installed nothing.
+  # A genuinely-gone pod's response is a bare {"error", "code", "status"}
+  # object with no pod fields at all - checking for the absence of
+  # `.desiredStatus` (only present on a real pod object) is the precise
+  # signal, instead of string-matching "error" anywhere in the blob.
   log_info "Waiting for prewarm to finish (installs + model download can take a while on first run)..."
-  local waited=0 max_wait=3600 min_wait=120 get_output
+  local waited=0 max_wait=3600 min_wait=120 get_output pod_status
   while (( waited < max_wait )); do
     get_output="$(runpodctl pod get "$prewarm_pod_id" 2>&1)"
-    { grep -qi '"error"' <<< "$get_output" || ! grep -qi running <<< "$get_output"; } && break
+    if ! pod_status="$(jq -e -r '.desiredStatus' <<< "$get_output" 2>/dev/null)"; then
+      break  # response is a bare error object (no pod fields at all) - genuinely gone.
+    fi
+    [[ "$pod_status" != "RUNNING" ]] && break  # stopped/exited but not yet deleted.
     sleep 15; waited=$((waited + 15))
   done
 
