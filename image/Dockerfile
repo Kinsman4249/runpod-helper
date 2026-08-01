@@ -60,4 +60,10 @@ COPY entrypoint.sh /opt/runpod-lab/entrypoint.sh
 COPY presets.conf /opt/runpod-lab/presets.conf
 RUN chmod +x /opt/runpod-lab/onstart.sh /opt/runpod-lab/entrypoint.sh
 
-CMD ["/opt/runpod-lab/entrypoint.sh"]
+# The base image sets ENTRYPOINT ["/app/llama-server"] (confirmed against
+# ggml-org/llama.cpp's .devops/cuda.Dockerfile server target, 2026-07-31) and
+# never gets overridden by a plain CMD - CMD is just appended as arguments to
+# the inherited ENTRYPOINT, so without this the container actually ran
+# `llama-server /opt/runpod-lab/entrypoint.sh`, which llama-server rejected
+# as an unrecognized flag on every start (`error: invalid argument`).
+ENTRYPOINT ["/opt/runpod-lab/entrypoint.sh"]
