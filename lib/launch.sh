@@ -191,7 +191,11 @@ maybe_run_prewarm() {
 
   # A stuck prewarm pod is still real money (if not much) - clean it up on
   # every exit path out of this function, not just the happy one.
-  trap 'runpodctl pod stop "'"$prewarm_pod_id"'" >/dev/null 2>&1; runpodctl pod delete "'"$prewarm_pod_id"'" >/dev/null 2>&1' RETURN
+  # `|| true` on both: the pod usually self-terminates already (see below),
+  # so these normally fail (pod not found) - under `set -e`, a failing
+  # command inside a RETURN trap was observed live (2026-08-01) to make the
+  # whole script exit non-zero despite everything actually succeeding.
+  trap 'runpodctl pod stop "'"$prewarm_pod_id"'" >/dev/null 2>&1 || true; runpodctl pod delete "'"$prewarm_pod_id"'" >/dev/null 2>&1 || true' RETURN
 
   # Confirmed live (2026-08-01): RunPod restarts a pod's container on ANY
   # exit, including a clean `exit 0` - polling for status to merely leave
