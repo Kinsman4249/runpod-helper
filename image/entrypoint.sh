@@ -160,29 +160,39 @@ else
   LLAMA_PORT=8081
 fi
 
-# Absolute path, not a bare `llama-server` PATH lookup - confirmed live
-# 2026-08-01 that the base image's own ENTRYPOINT invokes it by absolute
-# path (/app/llama-server) and never actually puts /app on $PATH, so a bare
-# `nohup llama-server ...` here failed instantly with "No such file or
-# directory" on every boot. entrypoint.sh's own PATH export above only adds
-# $BIN_DIR, which doesn't help.
-echo "Starting llama-server ($MODEL_PRESET, port $LLAMA_PORT)..."
-nohup /app/llama-server \
-  --model "$MODEL_PATH" \
-  --host 127.0.0.1 --port "$LLAMA_PORT" \
-  "${LLAMA_EXTRA_ARGS[@]}" \
-  >"$RUN_DIR/llama-server.log" 2>&1 &
-echo $! > "$RUN_DIR/llama-server.pid"
+# SKIP_INFERENCE=1 is an escape hatch for diagnosing/benchmarking a pod
+# without a GPU attached - loading a 17-20GB model on a CPU pod's default
+# 4GB RAM OOMs the whole container almost immediately (confirmed live
+# 2026-08-01: a CPU benchmark pod crash-looped on this repeatedly). Not
+# used by any normal launch path in lib/launch.sh - GPU pods always have
+# enough VRAM/RAM for this and should never set it.
+if [[ "${SKIP_INFERENCE:-0}" == 1 ]]; then
+  echo "SKIP_INFERENCE=1 - not starting llama-server (diagnostic/benchmark mode)."
+else
+  # Absolute path, not a bare `llama-server` PATH lookup - confirmed live
+  # 2026-08-01 that the base image's own ENTRYPOINT invokes it by absolute
+  # path (/app/llama-server) and never actually puts /app on $PATH, so a bare
+  # `nohup llama-server ...` here failed instantly with "No such file or
+  # directory" on every boot. entrypoint.sh's own PATH export above only adds
+  # $BIN_DIR, which doesn't help.
+  echo "Starting llama-server ($MODEL_PRESET, port $LLAMA_PORT)..."
+  nohup /app/llama-server \
+    --model "$MODEL_PATH" \
+    --host 127.0.0.1 --port "$LLAMA_PORT" \
+    "${LLAMA_EXTRA_ARGS[@]}" \
+    >"$RUN_DIR/llama-server.log" 2>&1 &
+  echo $! > "$RUN_DIR/llama-server.pid"
 
-# Give the frontend something to connect to instead of racing it - wait for
-# llama-server's health endpoint, same "poll with a timeout" shape as
-# wait_for_pod_ready() in lib/launch.sh.
-echo "Waiting for llama-server to report healthy..."
-waited=0
-until curl -fsS "http://127.0.0.1:${LLAMA_PORT}/health" >/dev/null 2>&1; do
-  (( waited >= 180 )) && { echo "llama-server didn't come up within 180s - check $RUN_DIR/llama-server.log" >&2; break; }
-  sleep 3; waited=$((waited + 3))
-done
+  # Give the frontend something to connect to instead of racing it - wait for
+  # llama-server's health endpoint, same "poll with a timeout" shape as
+  # wait_for_pod_ready() in lib/launch.sh.
+  echo "Waiting for llama-server to report healthy..."
+  waited=0
+  until curl -fsS "http://127.0.0.1:${LLAMA_PORT}/health" >/dev/null 2>&1; do
+    (( waited >= 180 )) && { echo "llama-server didn't come up within 180s - check $RUN_DIR/llama-server.log" >&2; break; }
+    sleep 3; waited=$((waited + 3))
+  done
+fi
 
 # --- frontend: exactly one, always on 127.0.0.1:3000 -------------------------
 case "$FRONTEND" in
