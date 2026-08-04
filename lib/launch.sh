@@ -229,13 +229,32 @@ maybe_run_prewarm() {
   # object with no pod fields at all - checking for the absence of
   # `.desiredStatus` (only present on a real pod object) is the precise
   # signal, instead of string-matching "error" anywhere in the blob.
+  # min_wait alone is NOT proof of a real finish - confirmed live twice now
+  # (2026-08-01 and again 2026-08-03) that a pod stuck at uptimeSeconds=0
+  # the whole time (never actually booting far enough to run entrypoint.sh)
+  # can still sit around past min_wait before vanishing (self-inflicted
+  # RunPod flakiness, or someone manually tearing it down after giving up
+  # waiting - both look identical to a real finish from here). The one
+  # signal that distinguishes "the pod genuinely ran and finished" from
+  # "the pod sat dead and then disappeared" is whether uptimeSeconds was
+  # EVER observed > 0 - that only happens once the container actually
+  # started, which is a prerequisite for entrypoint.sh doing any work at
+  # all. Track it across the loop and require it before trusting min_wait.
   log_info "Waiting for prewarm to finish (installs + model download can take a while on first run)..."
-  local waited=0 max_wait=3600 min_wait=120 get_output pod_status
+  local waited=0 max_wait=3600 min_wait=120 get_output pod_status uptime saw_real_uptime=0
   while (( waited < max_wait )); do
-    get_output="$(runpodctl pod get "$prewarm_pod_id" 2>&1)"
+    # `|| true`: runpodctl exits non-zero once the pod is gone (404), and
+    # under `set -e` a failing command substitution assignment kills the
+    # whole script right here - before the jq check below, which is the
+    # code that's actually supposed to handle a gone pod, ever runs.
+    # Confirmed live (2026-08-03): script died silently (exit 0, masked by
+    # the `| tee` pipe) instead of reaching the log_warn/log_ok branches.
+    get_output="$(runpodctl pod get "$prewarm_pod_id" 2>&1)" || true
     if ! pod_status="$(jq -e -r '.desiredStatus' <<< "$get_output" 2>/dev/null)"; then
       break  # response is a bare error object (no pod fields at all) - genuinely gone.
     fi
+    uptime="$(jq -r '.uptimeSeconds // 0' <<< "$get_output" 2>/dev/null)"
+    [[ "${uptime:-0}" =~ ^[0-9]+$ && "$uptime" -gt 0 ]] && saw_real_uptime=1
     [[ "$pod_status" != "RUNNING" ]] && break  # stopped/exited but not yet deleted.
     sleep 15; waited=$((waited + 15))
   done
@@ -247,6 +266,11 @@ maybe_run_prewarm() {
 
   if (( waited < min_wait )); then
     log_warn "Prewarm pod disappeared after only ${waited}s - too fast to be a genuine finish (installs + model download take much longer). Likely a scheduling/image-pull failure, not success. Not marking this volume as prewarmed; the GPU pod will do the install itself, or rerun with --prewarm after checking the console."
+    return
+  fi
+
+  if (( saw_real_uptime == 0 )); then
+    log_warn "Prewarm pod never reported uptimeSeconds > 0 in ${waited}s before disappearing - it never actually booted far enough to run entrypoint.sh (RunPod-side flakiness, e.g. stuck ssh.error/'pod not ready'), so nothing was installed. Not marking this volume as prewarmed; rerun with --prewarm once RunPod is stable."
     return
   fi
 
