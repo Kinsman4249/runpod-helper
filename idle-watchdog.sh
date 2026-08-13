@@ -60,10 +60,15 @@ read_vllm_activity() {
 shutdown_pod() {
   log "Idle limit reached with no vLLM request activity."
   local pod_id="${RUNPOD_POD_ID:?RUNPOD_POD_ID not set, cannot self-identify to stop/delete}"
+  # timeout on both calls: this is the actual cost-control mechanism (see
+  # top-of-file comment) - a runpodctl call that hangs on a network hiccup
+  # instead of failing fast would leave the pod running and billing
+  # indefinitely with no error ever surfaced, same class of bug as the
+  # local-machine scripts' runpodctl_t (lib/common.sh).
   log "Stopping pod $pod_id..."
-  runpodctl pod stop "$pod_id" || log "WARNING: pod stop call failed, attempting delete anyway."
+  timeout 20 runpodctl pod stop "$pod_id" || log "WARNING: pod stop call failed or timed out, attempting delete anyway."
   log "Deleting pod $pod_id..."
-  runpodctl pod delete "$pod_id" || log "ERROR: pod delete call failed. Pod may keep running/billing - needs manual cleanup."
+  timeout 20 runpodctl pod delete "$pod_id" || log "ERROR: pod delete call failed or timed out. Pod may keep running/billing - needs manual cleanup."
   exit 0
 }
 

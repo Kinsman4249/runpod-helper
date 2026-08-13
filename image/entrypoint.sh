@@ -42,9 +42,18 @@ service ssh start || echo "WARNING: sshd failed to start - SSH access to this po
 # (set up once during the local wizard's Cloudflare step), not a local
 # config.yml - token-based `cloudflared tunnel run` picks up dashboard-
 # defined routes automatically.
+DISABLE_LOGGING="${DISABLE_LOGGING:-0}"
 echo "Starting cloudflared tunnel..."
-nohup cloudflared tunnel run --token "${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN not set}" \
-  >"$RUN_DIR/cloudflared.log" 2>&1 &
+if [[ "$DISABLE_LOGGING" == 1 ]]; then
+  # DISABLE_LOGGING=1: don't even keep cloudflared's own connection log
+  # around on disk - it holds no request content, just tunnel-connection
+  # noise, but "nuke logging" means nuke it too.
+  nohup cloudflared tunnel run --token "${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN not set}" \
+    >/dev/null 2>&1 &
+else
+  nohup cloudflared tunnel run --token "${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN not set}" \
+    >"$RUN_DIR/cloudflared.log" 2>&1 &
+fi
 echo $! > "$RUN_DIR/cloudflared.pid"
 
 # --- PREWARM_ONLY: download weights onto the volume, then self-terminate ---
@@ -60,8 +69,8 @@ if [[ "${PREWARM_ONLY:-0}" == 1 ]]; then
   echo "Prewarm download done. Self-terminating via runpodctl..."
   pod_id="${RUNPOD_POD_ID:?RUNPOD_POD_ID not set, cannot self-identify to stop/delete}"
   export RUNPOD_API_KEY="${RUNPOD_API_KEY:?RUNPOD_API_KEY not set}"
-  runpodctl pod stop "$pod_id" || true
-  runpodctl pod delete "$pod_id" || true
+  timeout 20 runpodctl pod stop "$pod_id" || true
+  timeout 20 runpodctl pod delete "$pod_id" || true
   # Fallback if the API calls above didn't actually remove the pod: sleep
   # instead of exiting, so RunPod's restart-on-exit behavior doesn't loop
   # this download forever.
@@ -90,11 +99,26 @@ echo $! > "$RUN_DIR/idle-watchdog.pid"
 # PRESET_TABLE in ../../lib/launch.sh. Old saved sessions from before this
 # var existed won't set it either, same default applies.
 QUANTIZATION="${QUANTIZATION:-auto}"
-echo "Starting vllm serve: model=${MODEL_REPO:?MODEL_REPO not set} served-as=${SERVED_MODEL_NAME:?SERVED_MODEL_NAME not set} max-model-len=${MAX_MODEL_LEN:?MAX_MODEL_LEN not set} quantization=$QUANTIZATION"
+echo "Starting vllm serve: model=${MODEL_REPO:?MODEL_REPO not set} served-as=${SERVED_MODEL_NAME:?SERVED_MODEL_NAME not set} max-model-len=${MAX_MODEL_LEN:?MAX_MODEL_LEN not set} quantization=$QUANTIZATION disable-logging=$DISABLE_LOGGING"
+
+# vLLM's own --enable-log-requests/--enable-log-outputs already default to
+# False (docs.vllm.ai/en/stable/cli/serve/, checked 2026-08-13) - prompt/
+# response content is never logged by this repo's default invocation either
+# way. DISABLE_LOGGING=1 additionally silences what IS logged by default:
+# --disable-log-stats (throughput/request-count stats, no content) and
+# --disable-uvicorn-access-log (HTTP access lines - method/path/status/
+# client IP). Both would otherwise land on stdout, which is what RunPod's
+# own console "Logs" view captures - this is the "console" half of "nuke
+# logging"; cloudflared's disk log above is the other half.
+declare -a vllm_log_flags=()
+if [[ "$DISABLE_LOGGING" == 1 ]]; then
+  vllm_log_flags=(--disable-log-stats --disable-uvicorn-access-log)
+fi
 exec vllm serve "$MODEL_REPO" \
   --host 0.0.0.0 \
   --port 8000 \
   --served-model-name "$SERVED_MODEL_NAME" \
   --max-model-len "$MAX_MODEL_LEN" \
   --quantization "$QUANTIZATION" \
-  --api-key "${VLLM_API_KEY:?VLLM_API_KEY not set}"
+  --api-key "${VLLM_API_KEY:?VLLM_API_KEY not set}" \
+  "${vllm_log_flags[@]}"

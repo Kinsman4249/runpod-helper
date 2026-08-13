@@ -49,6 +49,20 @@ RunPod's side beyond the model-weights cache.
 - A cheap CPU pod can pre-download a model's weights onto the network
   volume (`--prewarm` / `--prewarm-only`) before the expensive GPU pod
   ever boots, since the download is pure network/CPU-bound work.
+- `--storage-mode container-disk` (default: `network-volume`) skips the
+  network volume entirely and uses a bigger, local, per-pod disk
+  instead - faster reads, but the model re-downloads every session and
+  nothing survives `idle-watchdog.sh` deleting the pod. See
+  `lib/launch.sh`'s `CONTAINER_DISK_GB_STANDALONE` comment; run
+  `e2e-test.sh --storage-mode <mode>` with each value to compare actual
+  wall-clock time for your own model/GPU choice.
+- `--no-logging` disables vLLM's stats/access logging and cloudflared's
+  disk log for the pod, on top of vLLM's own default of not logging
+  prompt/response content - see `image/entrypoint.sh`.
+- RUNPOD_API_KEY, VLLM_API_KEY, and CLOUDFLARE_TUNNEL_TOKEN live in the
+  OS keyring (`secret-tool`/libsecret), not `~/.runpod-lab/config` -
+  see `load_secrets()` in `lib/common.sh`. An existing plaintext config
+  from before this change migrates automatically on the next run.
 
 ## Why
 
@@ -97,7 +111,7 @@ client at it:
 
 ```
 base_url: https://<your-api-hostname>/v1
-api_key:  <VLLM_API_KEY from ~/.runpod-lab/config>
+api_key:  <VLLM_API_KEY - stored in the OS keyring, not a file; `secret-tool lookup service runpod-lab field vllm_api_key`>
 model:    <served-model-name from the launch summary, e.g. "qwen3-32b">
 ```
 
@@ -147,5 +161,4 @@ type one in. See PREREQUISITES.md for why that tradeoff is fine here
 
 ## License
 
-Not yet decided - add one before the first tagged release if this repo
-becomes public-facing beyond personal use.
+GPLv3 - see [LICENSE](LICENSE).

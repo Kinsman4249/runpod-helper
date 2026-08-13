@@ -25,23 +25,49 @@ FORCE_PREWARM=0
 PREWARM_ONLY=0
 IDLE_MINUTES=20
 MAX_RUNTIME_HOURS=4
+STORAGE_MODE="network-volume"
+NUKE_LOGGING=0
+DEBUG=0
 
 usage() {
   cat <<EOF
-Usage: $0 [--setup] [--rotate] [--new] [--prewarm] [--prewarm-only] [--idle-minutes N] [--max-runtime-hours N]
+Usage: $0 [--setup] [--rotate] [--new] [--prewarm] [--prewarm-only] [--idle-minutes N] [--max-runtime-hours N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
 
   --setup                 Force the first-run setup wizard, even if config exists.
-  --rotate                Re-paste the RunPod API key and/or Cloudflare tunnel token
-                           (whichever got rotated) without redoing the rest of setup.
+  --rotate                Re-paste the RunPod API key and/or Cloudflare tunnel token,
+                           and/or regenerate the dedicated SSH keypair (whichever
+                           needs rolling), without redoing the rest of setup.
   --new                   Re-pick GPU/model instead of reusing the last session.
   --prewarm                Force a model-weights prewarm run on a cheap CPU pod even if
                            this volume is already marked prewarmed for this model, then
                            continue to the normal GPU pod launch (see lib/launch.sh).
+                           Ignored (and refused) with --storage-mode container-disk -
+                           there's no persistent volume to prewarm in that mode.
   --prewarm-only           Run the prewarm (forced) and stop - no GPU pod gets created.
                            Useful for "warm the volume now, launch the real pod later".
   --idle-minutes N        Minutes with no vLLM request activity before the pod
                            auto-shuts-down (default 20).
   --max-runtime-hours N   Hard wall-clock cap on the pod's lifetime, regardless of activity (default 4).
+  --storage-mode MODE     "network-volume" (default): weights persist on a billed network
+                           volume across pod recreations. "container-disk": no network
+                           volume, weights land on a bigger local disk instead (faster
+                           reads) but re-download every session and don't survive
+                           idle-watchdog.sh deleting the pod.
+  --no-logging             Disable vLLM's stats/access logging and idle-watchdog.sh's disk
+                           log for this pod, on top of vLLM's own default of not logging
+                           prompt/response content. See CHANGELOG.md for what this does
+                           and does not cover.
+  --debug                  Trace every command (set -x) to both the terminal and a
+                           timestamped log file under ~/.runpod-lab/logs, tagged with the
+                           build number. Use this if something hangs or fails with no
+                           clear reason. Known secrets (API keys, tokens) are best-effort
+                           redacted - NOT guaranteed - so skim before pasting the output
+                           anywhere, same as you would for any debug log.
+  --debug-quiet            Same trace, written to the log file only - console stays clean
+                           (just the normal prompts/output), for when --debug's live trace
+                           makes an interactive wizard run unreadable. The log file won't
+                           contain the wizard's own prompt/message text this way, only the
+                           trace itself - use --debug instead if you need both.
 EOF
 }
 
@@ -54,6 +80,10 @@ while (( $# > 0 )); do
     --prewarm-only) FORCE_PREWARM=1; PREWARM_ONLY=1 ;;
     --idle-minutes) IDLE_MINUTES="$2"; shift ;;
     --max-runtime-hours) MAX_RUNTIME_HOURS="$2"; shift ;;
+    --storage-mode) STORAGE_MODE="$2"; shift ;;
+    --no-logging) NUKE_LOGGING=1 ;;
+    --debug) DEBUG=1; DEBUG_MODE="both" ;;
+    --debug-quiet) DEBUG=1; DEBUG_MODE="disk" ;;
     -h|--help) usage; exit 0 ;;
     *) log_error "Unknown argument: $1"; usage; exit 1 ;;
   esac
@@ -62,6 +92,12 @@ done
 
 [[ "$IDLE_MINUTES" =~ ^[0-9]+$ ]] || die "--idle-minutes needs a number."
 [[ "$MAX_RUNTIME_HOURS" =~ ^[0-9]+$ ]] || die "--max-runtime-hours needs a number."
+[[ "$STORAGE_MODE" == "network-volume" || "$STORAGE_MODE" == "container-disk" ]] \
+  || die "--storage-mode must be 'network-volume' or 'container-disk', got '$STORAGE_MODE'."
+[[ "$STORAGE_MODE" == "container-disk" && "$FORCE_PREWARM" == 1 ]] \
+  && die "--prewarm/--prewarm-only make no sense with --storage-mode container-disk - there's no persistent volume to prewarm."
+export STORAGE_MODE
+[[ "$DEBUG" == 1 ]] && enable_debug_logging startup "$DEBUG_MODE"
 
 if [[ ! -f "$CONFIG_FILE" || "$SETUP" == 1 ]]; then
   run_setup_wizard
@@ -70,11 +106,15 @@ fi
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
+# Populates RUNPOD_API_KEY/VLLM_API_KEY/CLOUDFLARE_TUNNEL_TOKEN from the OS
+# keyring (migrating them out of the file above if this is a pre-keyring
+# config) - see load_secrets() in lib/common.sh.
+load_secrets
 # runpodctl is a separate process and only reads RUNPOD_API_KEY from its own
-# environment, not from vars merely set in this shell - source'ing the plain
-# KEY=value line above doesn't export it, so every runpodctl call would
+# environment, not from vars merely set in this shell - the value load_secrets
+# just set in this shell doesn't export it, so every runpodctl call would
 # silently fall back to whatever key is cached in ~/.runpod/config.toml
-# instead of the one in $CONFIG_FILE.
+# instead of the one just loaded.
 export RUNPOD_API_KEY
 
 # Defense in depth: catches a credential file that ended up world/group-

@@ -89,6 +89,18 @@ the wizard can take over.
    `cloudflared` is only needed locally to validate the tunnel token
    during setup - the pod itself runs its own `cloudflared`, not this
    one.
+4. `secret-tool` (package `libsecret-tools` on Debian/Ubuntu,
+   `libsecret` on Fedora/Arch) NOT auto-installed by the wizard (it's a
+   system package, not a standalone release binary) - the wizard dies
+   with the exact package name if it's missing. RUNPOD_API_KEY,
+   VLLM_API_KEY, and CLOUDFLARE_TUNNEL_TOKEN are stored in the OS
+   keyring via this tool instead of a plaintext file, which needs a
+   running, unlocked Secret Service (GNOME Keyring or KWallet) in your
+   session - true by default on a normal desktop login, not available
+   in a headless shell or a container with no D-Bus session bus. If
+   you're running these scripts from inside a container (e.g. a
+   Distrobox/Toolbox dev environment), run them from the host session
+   or a shell that has your desktop's D-Bus/keyring reachable instead.
 
 ## One thing to decide before you start
 

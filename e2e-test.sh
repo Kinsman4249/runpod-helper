@@ -31,10 +31,13 @@ CHECK_IDLE_SHUTDOWN=0
 IDLE_MINUTES=3
 MAX_RUNTIME_HOURS=1
 SKIP_SSH_CHECK=0
+STORAGE_MODE="network-volume"
+NUKE_LOGGING=0
+DEBUG=0
 
 usage() {
   cat <<EOF
-Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--idle-minutes N] [--skip-ssh-check]
+Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--idle-minutes N] [--skip-ssh-check] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
 
   --preset NAME            Built-in preset to test (see lib/launch.sh's PRESET_TABLE
                             for values). Defaults to the smallest/fastest-loading one.
@@ -51,6 +54,17 @@ Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--idle-minutes N] [-
   --skip-ssh-check          Skip the SSH-reachability and on-pod process checks. Only
                             the HTTP endpoint gets exercised. Use if the dedicated key
                             from setup_ssh_key() hasn't been set up yet.
+  --storage-mode MODE       "network-volume" (default) or "container-disk" - see
+                            lib/launch.sh. Run this script once with each value (same
+                            --preset) to A/B compare: this script prints the wall-clock
+                            time from pod-create to vLLM-ready either way, which is the
+                            main cost/speed axis that differs between the two modes.
+  --no-logging              Passes DISABLE_LOGGING=1 to the pod - see image/entrypoint.sh.
+  --debug                   Trace every command (set -x) to both the terminal and a
+                            timestamped log file under ~/.runpod-lab/logs. Known secrets
+                            are best-effort redacted - NOT guaranteed - skim before
+                            pasting the output anywhere.
+  --debug-quiet             Same trace, written to the log file only - console stays clean.
 
 Exit status: 0 if every check that ran passed, 1 otherwise.
 EOF
@@ -63,16 +77,25 @@ while (( $# > 0 )); do
     --check-idle-shutdown) CHECK_IDLE_SHUTDOWN=1 ;;
     --idle-minutes) IDLE_MINUTES="$2"; shift ;;
     --skip-ssh-check) SKIP_SSH_CHECK=1 ;;
+    --storage-mode) STORAGE_MODE="$2"; shift ;;
+    --no-logging) NUKE_LOGGING=1 ;;
+    --debug) DEBUG=1; DEBUG_MODE="both" ;;
+    --debug-quiet) DEBUG=1; DEBUG_MODE="disk" ;;
     -h|--help) usage; exit 0 ;;
     *) log_error "Unknown argument: $1"; usage; exit 1 ;;
   esac
   shift
 done
 [[ "$IDLE_MINUTES" =~ ^[0-9]+$ ]] || die "--idle-minutes needs a number."
+[[ "$STORAGE_MODE" == "network-volume" || "$STORAGE_MODE" == "container-disk" ]] \
+  || die "--storage-mode must be 'network-volume' or 'container-disk', got '$STORAGE_MODE'."
+export STORAGE_MODE NUKE_LOGGING
+[[ "$DEBUG" == 1 ]] && enable_debug_logging e2e-test "$DEBUG_MODE"
 
 [[ -f "$CONFIG_FILE" ]] || die "No config at $CONFIG_FILE - run './startup.sh --setup' first. This script reuses that config, it doesn't create one."
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
+load_secrets
 export RUNPOD_API_KEY
 
 log_info "e2e-test.sh starting (build $RUNPOD_LAB_BUILD)."
@@ -121,7 +144,9 @@ log_info "GPU: $gpu_name (${gpu_vram}GB, \$${gpu_price}/hr) - cheapest available
 
 # --- launch -------------------------------------------------------------
 
-ensure_network_volume
+if [[ "$STORAGE_MODE" == "network-volume" ]]; then
+  ensure_network_volume
+fi
 
 PASS=1
 POD_CREATED=0
@@ -137,8 +162,8 @@ cleanup() {
   if [[ "$POD_CREATED" == 1 && "$KEEP_POD" != 1 ]]; then
     log_info ""
     log_info "Tearing down pod $POD_ID..."
-    runpodctl pod stop "$POD_ID" >/dev/null 2>&1 || true
-    runpodctl pod delete "$POD_ID" >/dev/null 2>&1 || true
+    runpodctl_t pod stop "$POD_ID" >/dev/null 2>&1 || true
+    runpodctl_t pod delete "$POD_ID" >/dev/null 2>&1 || true
     log_ok "Pod $POD_ID stopped/deleted."
   elif [[ "$POD_CREATED" == 1 ]]; then
     log_warn "--keep passed: pod $POD_ID left running. You are responsible for 'runpodctl pod stop/delete $POD_ID' when done - it is billing right now."
@@ -146,10 +171,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Timed from create_pod through vLLM actually serving - the wall-clock axis
+# that differs between storage modes: network-volume pays this once (later
+# runs skip the download via maybe_run_prewarm/HF_HOME caching),
+# container-disk pays it fresh every single run. Run this script once per
+# --storage-mode (same --preset) and compare the two numbers this prints,
+# alongside lib/launch.sh's CONTAINER_DISK_GB_STANDALONE comment and
+# README's storage rate table, to see which is actually cheaper for your
+# own launch frequency - deliberately not modeled further here since that
+# depends on usage pattern (how often you launch, how long sessions run).
+launch_started="$(date +%s)"
 create_pod
 POD_CREATED=1
 wait_for_pod_ready
 wait_for_vllm_ready
+launch_elapsed=$(( $(date +%s) - launch_started ))
+log_info ""
+log_info "Timing (storage-mode=$STORAGE_MODE, preset=$PRESET_NAME): ${launch_elapsed}s from pod-create to vLLM-ready."
 
 # --- checks --------------------------------------------------------------
 
@@ -209,7 +247,7 @@ if [[ "$CHECK_IDLE_SHUTDOWN" == 1 && "$KEEP_POD" != 1 ]]; then
   idle_check_max_wait=$(( (IDLE_MINUTES + 3) * 60 ))
   idle_fired=0
   while (( idle_check_waited < idle_check_max_wait )); do
-    if ! runpodctl pod get "$POD_ID" >/dev/null 2>&1; then
+    if ! runpodctl_t pod get "$POD_ID" >/dev/null 2>&1; then
       idle_fired=1
       break
     fi

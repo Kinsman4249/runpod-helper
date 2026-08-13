@@ -8,6 +8,30 @@ CONTAINER_DISK_GB=40   # holds the vLLM image + OS only; weights live on the
                        # stack) - not yet measured against a real pull, bump
                        # this if it turns out too small.
 
+# Used instead of CONTAINER_DISK_GB when STORAGE_MODE=container-disk: no
+# network volume is attached, so this disk has to hold the image/OS AND the
+# model weights (HF_HOME falls back to plain local disk under
+# /workspace/persistent - entrypoint.sh needs no change for this, it just
+# mkdir -p's a normal directory instead of a mounted volume). Sized
+# generously since container disk is billed per-second only while the pod is
+# running (free once stopped) - the real cost driver for this mode is GB
+# rather than time. The largest current preset needing headroom is
+# qwen3.5-40b-deckard: it downloads the full bf16 checkpoint (~80GB, roughly
+# double its ~40GB post-quantization VRAM footprint) since vLLM's
+# --quantization fp8 quantizes on the fly at load time rather than
+# downloading a pre-quantized repo - not yet measured against a real pull,
+# bump this if it turns out too small.
+CONTAINER_DISK_GB_STANDALONE=150
+
+# "network-volume" (default): current behavior, model weights persist on a
+# billed network volume across pod recreations. "container-disk": no network
+# volume at all, weights land on the pod's own (bigger, local, ephemeral)
+# container disk instead - faster reads, but every fresh pod re-downloads
+# the model, and nothing survives idle-watchdog.sh deleting the pod. Callers
+# (startup.sh, e2e-test.sh) set this from a --storage-mode flag before
+# calling run_normal_launch/create_pod; defaults here only as a safety net.
+STORAGE_MODE="${STORAGE_MODE:-network-volume}"
+
 # Built by ../image/Dockerfile, published by
 # ../.github/workflows/build-image.yml on every push to image/**.
 IMAGE_NAME="ghcr.io/kinsman4249/runpod-helper-image:latest"
@@ -47,7 +71,7 @@ qwen3.5-40b-deckard|DavidAU/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensor
 list_available_gpus() {
   local min_vram="$1"
   local gpu_json
-  gpu_json="$(runpodctl gpu list)" || die "Could not list GPUs - check https://www.runpod.io/console/gpu-cloud instead."
+  gpu_json="$(runpodctl_t gpu list)" || die "Could not list GPUs - check https://www.runpod.io/console/gpu-cloud instead."
 
   # Field names (gpuId, displayName, memoryInGb, securePricePerHr,
   # dataCenterAvailability[].stockStatus) confirmed against live
@@ -164,7 +188,7 @@ pick_preset_and_gpu() {
         prompt_text "Context length in tokens (suggested $default_ctx for this model/GPU pairing, $TEXT_BACK_WORD to go back): " MAX_MODEL_LEN || { step="gpu"; continue; }
         [[ -z "$MAX_MODEL_LEN" ]] && MAX_MODEL_LEN="$default_ctx"
         [[ "$MAX_MODEL_LEN" =~ ^[0-9]+$ ]] || die "Context length must be a number."
-        if [[ "$MODEL_PRESET" == "custom" ]]; then
+        if [[ "$MODEL_PRESET" == "custom" && "$STORAGE_MODE" == "network-volume" ]]; then
           step="custom_volume_size"
         else
           break
@@ -200,7 +224,7 @@ pick_preset_and_gpu() {
 # since a pod can only attach a volume from its own datacenter) if it's
 # gone - e.g. deleted overnight to stop paying for idle storage.
 ensure_network_volume() {
-  runpodctl network-volume get "$NETWORK_VOLUME_ID" >/dev/null 2>&1 && return
+  runpodctl_t network-volume get "$NETWORK_VOLUME_ID" >/dev/null 2>&1 && return
 
   log_warn "Network volume $NETWORK_VOLUME_ID (from $CONFIG_FILE) doesn't exist anymore."
   confirm "Create a new one in datacenter $DATACENTER_ID now?" \
@@ -247,7 +271,7 @@ ensure_network_volume() {
 ensure_volume_size_at_least() {
   local wanted_gb="$1"
   local current_gb
-  current_gb="$(runpodctl network-volume get "$NETWORK_VOLUME_ID" 2>/dev/null | jq -r '.size // empty')"
+  current_gb="$(runpodctl_t network-volume get "$NETWORK_VOLUME_ID" 2>/dev/null | jq -r '.size // empty')"
   [[ -n "$current_gb" ]] || { log_warn "Could not read the current volume size - skipping the resize check. Check manually with 'runpodctl network-volume get $NETWORK_VOLUME_ID' if the download later fails for lack of space."; return; }
 
   if (( wanted_gb <= current_gb )); then
@@ -258,7 +282,7 @@ ensure_volume_size_at_least() {
   confirm "Grow network volume $NETWORK_VOLUME_ID from ${current_gb}GB to ${wanted_gb}GB now? (billed, permanent, cannot be undone by shrinking later)" \
     || { log_warn "Not resizing - the download may fail for lack of space if the model actually needs ${wanted_gb}GB."; return; }
 
-  runpodctl network-volume update "$NETWORK_VOLUME_ID" --size "$wanted_gb" >/dev/null \
+  runpodctl_t network-volume update "$NETWORK_VOLUME_ID" --size "$wanted_gb" >/dev/null \
     || die "Volume resize failed. Check 'runpodctl network-volume get $NETWORK_VOLUME_ID' manually."
   log_ok "Volume $NETWORK_VOLUME_ID grown to ${wanted_gb}GB."
 }
@@ -292,7 +316,7 @@ maybe_run_prewarm() {
   # there's no --vcpu/--mem flag at all (unlike the deprecated top-level
   # `runpodctl create pod` alias, which has different, camelCase flag names -
   # don't confuse the two). Defaults to 2 vcpu/4GB mem, $0.06/hr in EUR-IS-1.
-  create_output="$(runpodctl pod create \
+  create_output="$(runpodctl_t pod create \
     --compute-type CPU \
     --image "$IMAGE_NAME" \
     --network-volume-id "$NETWORK_VOLUME_ID" \
@@ -311,7 +335,7 @@ maybe_run_prewarm() {
   # so these normally fail (pod not found) - under `set -e`, a failing
   # command inside a RETURN trap was observed live (2026-08-01) to make the
   # whole script exit non-zero despite everything actually succeeding.
-  trap 'runpodctl pod stop "'"$prewarm_pod_id"'" >/dev/null 2>&1 || true; runpodctl pod delete "'"$prewarm_pod_id"'" >/dev/null 2>&1 || true' RETURN
+  trap 'runpodctl_t pod stop "'"$prewarm_pod_id"'" >/dev/null 2>&1 || true; runpodctl_t pod delete "'"$prewarm_pod_id"'" >/dev/null 2>&1 || true' RETURN
 
   # Confirmed live (2026-08-01): RunPod restarts a pod's container on ANY
   # exit, including a clean `exit 0` - polling for status to merely leave
@@ -350,7 +374,7 @@ maybe_run_prewarm() {
     # under `set -e` a failing command substitution assignment kills the
     # whole script right here - before the jq check below, which is the
     # code that's actually supposed to handle a gone pod, ever runs.
-    get_output="$(runpodctl pod get "$prewarm_pod_id" 2>&1)" || true
+    get_output="$(runpodctl_t pod get "$prewarm_pod_id" 2>&1)" || true
     if ! pod_status="$(jq -e -r '.desiredStatus' <<< "$get_output" 2>/dev/null)"; then
       break  # response is a bare error object (no pod fields at all) - genuinely gone.
     fi
@@ -392,21 +416,35 @@ create_pod() {
   log_info ""
   log_info "Creating pod (GPU $GPU_ID, model $MODEL_REPO, auto-terminate at $terminate_after UTC)..."
 
-  # --env deliberately carries ONLY these eight names - no GitHub credential,
+  # --env deliberately carries ONLY these nine names - no GitHub credential,
   # no git identity: this pod only serves inference, nothing on it edits or
   # commits code anymore.
   local env_json
-  env_json=$(printf '{"CLOUDFLARE_TUNNEL_TOKEN":"%s","MODEL_REPO":"%s","SERVED_MODEL_NAME":"%s","MAX_MODEL_LEN":"%s","QUANTIZATION":"%s","VLLM_API_KEY":"%s","IDLE_MINUTES":"%s","RUNPOD_API_KEY":"%s"}' \
-    "$CLOUDFLARE_TUNNEL_TOKEN" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$MAX_MODEL_LEN" "${MODEL_QUANTIZATION:-auto}" "$VLLM_API_KEY" "$IDLE_MINUTES" "$RUNPOD_API_KEY")
+  env_json=$(printf '{"CLOUDFLARE_TUNNEL_TOKEN":"%s","MODEL_REPO":"%s","SERVED_MODEL_NAME":"%s","MAX_MODEL_LEN":"%s","QUANTIZATION":"%s","VLLM_API_KEY":"%s","IDLE_MINUTES":"%s","RUNPOD_API_KEY":"%s","DISABLE_LOGGING":"%s"}' \
+    "$CLOUDFLARE_TUNNEL_TOKEN" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$MAX_MODEL_LEN" "${MODEL_QUANTIZATION:-auto}" "$VLLM_API_KEY" "$IDLE_MINUTES" "$RUNPOD_API_KEY" "${NUKE_LOGGING:-0}")
+
+  # STORAGE_MODE=container-disk omits --network-volume-id/--volume-mount-path
+  # entirely - with nothing mounted at /workspace/persistent, entrypoint.sh's
+  # `mkdir -p "$PERSIST_DIR/..."` calls just create plain directories on the
+  # pod's own (bigger) container disk instead, no entrypoint.sh change
+  # needed. See CONTAINER_DISK_GB_STANDALONE above for the sizing rationale.
+  local -a storage_args
+  if [[ "$STORAGE_MODE" == "container-disk" ]]; then
+    storage_args=(--container-disk-in-gb "$CONTAINER_DISK_GB_STANDALONE")
+  else
+    storage_args=(
+      --network-volume-id "$NETWORK_VOLUME_ID"
+      --volume-mount-path /workspace/persistent
+      --container-disk-in-gb "$CONTAINER_DISK_GB"
+    )
+  fi
 
   local create_output
-  create_output="$(runpodctl pod create \
+  create_output="$(runpodctl_t pod create \
     --cloud-type SECURE \
     --gpu-id "$GPU_ID" \
     --image "$IMAGE_NAME" \
-    --network-volume-id "$NETWORK_VOLUME_ID" \
-    --volume-mount-path /workspace/persistent \
-    --container-disk-in-gb "$CONTAINER_DISK_GB" \
+    "${storage_args[@]}" \
     --terminate-after "$terminate_after" \
     --name "runpod-lab-$(date +%s)" \
     --env "$env_json")" || die "Pod creation failed. Raw output:\n$create_output"
@@ -429,7 +467,7 @@ wait_for_pod_ready() {
   log_info "Waiting for pod $POD_ID to report running..."
   local waited=0 max_wait=600
   while (( waited < max_wait )); do
-    if runpodctl pod get "$POD_ID" 2>/dev/null | grep -qi running; then
+    if runpodctl_t pod get "$POD_ID" 2>/dev/null | grep -qi running; then
       break
     fi
     sleep 10; waited=$((waited + 10))
@@ -476,9 +514,15 @@ wait_for_vllm_ready() {
 # --- entry point -------------------------------------------------------------
 
 run_normal_launch() {
-  ensure_network_volume
+  if [[ "$STORAGE_MODE" == "network-volume" ]]; then
+    ensure_network_volume
+  else
+    log_info "STORAGE_MODE=container-disk: no network volume, model weights will download fresh onto the pod's own disk this run."
+  fi
   pick_preset_and_gpu
-  maybe_run_prewarm
+  if [[ "$STORAGE_MODE" == "network-volume" ]]; then
+    maybe_run_prewarm
+  fi
 
   if [[ "${PREWARM_ONLY:-0}" == 1 ]]; then
     log_info ""
