@@ -21,13 +21,15 @@ RunPod's side beyond the model-weights cache.
   nodes. `image/Dockerfile` only adds the thin layer needed to reach it
   through a stable hostname: `cloudflared`, `runpodctl`, and `sshd`
   (diagnostics only).
-- Five built-in model presets in the 30-90B range (AWQ/FP8-quantized so
-  they fit a single GPU): DeepSeek-R1-Distill-Qwen-32B, Qwen3-32B,
-  Qwen3-Coder-30B-A3B (MoE), Qwen2.5-72B-Instruct, and
-  Llama-3.3-70B-Instruct - plus a `custom` option to paste any Hugging
-  Face repo id, with a prompt to grow the network volume if it needs
-  more room than the presets assume. See `lib/launch.sh`'s
-  `PRESET_TABLE` for the exact repos and VRAM floors.
+- Six built-in model presets in the 30-90B range (quantized so they fit
+  a single GPU - AWQ for five of them, vLLM's own on-the-fly FP8 for
+  the sixth): DeepSeek-R1-Distill-Qwen-32B, Qwen3-32B, Qwen3-Coder-30B-
+  A3B (MoE), Qwen2.5-72B-Instruct, Llama-3.3-70B-Instruct, and
+  Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking - plus
+  a `custom` option to paste any Hugging Face repo id, with a prompt to
+  grow the network volume if it needs more room than the presets
+  assume. See `lib/launch.sh`'s `PRESET_TABLE` for the exact repos,
+  quantization methods, and VRAM floors.
 - `image/entrypoint.sh` (the pod image's `ENTRYPOINT`, runs every boot):
   starts `sshd` and the Cloudflare Tunnel, fetches and starts
   `idle-watchdog.sh` fresh from this repo's `main` branch (so a fix
@@ -127,10 +129,21 @@ client.chat.completions.create(model="<served-model-name>", messages=[{"role": "
 
 ## Testing
 
-Manual, for now: run `startup.sh`, confirm the pod comes up, confirm
-`curl` against the printed endpoint returns a real completion, and
-confirm the idle watchdog fires and shuts the pod down after the
-configured idle window with no request activity.
+`./e2e-test.sh` runs the full loop non-interactively against a real
+(billed) pod: picks the cheapest GPU meeting a preset's VRAM floor,
+creates the pod, waits for it to come up, then checks the OpenAI
+endpoint actually serves a completion and (unless `--skip-ssh-check`)
+that SSH reaches it with sshd/cloudflared/idle-watchdog/vllm all
+running - then always tears the pod down, pass or fail. See
+`./e2e-test.sh --help` for `--preset`, `--check-idle-shutdown` (also
+proves idle-watchdog.sh self-terminates the pod), and `--keep`.
+
+This only works non-interactively because `setup_ssh_key()` (in
+`lib/wizard.sh`) generates a dedicated, passphrase-free keypair for
+reaching these pods - a passphrase-protected key would otherwise stop
+`ssh runpod-lab` dead in any script or agent session with no way to
+type one in. See PREREQUISITES.md for why that tradeoff is fine here
+(the pods are ephemeral, and SSH access to them is diagnostics-only).
 
 ## License
 

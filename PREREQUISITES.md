@@ -16,12 +16,16 @@ the wizard can take over.
 3. Generate an API key (Settings > API Keys). Keep it somewhere you can
    paste from - the wizard asks for it on first run and uses it for
    everything after that.
-4. Have an SSH keypair on your machine (`ls ~/.ssh/id_ed25519.pub`, or
-   `ssh-keygen -t ed25519` if you don't have one). RunPod pods are
-   reached over SSH (diagnostics only - normal use is the OpenAI
-   endpoint, not an interactive session) and the public key has to be
-   registered on your RunPod account. The wizard can register it for
-   you, but the keypair itself has to exist first.
+4. Nothing to prepare here - the wizard generates its own dedicated
+   keypair (`~/.runpod-lab/ssh_key`, no passphrase) the first time it
+   runs and registers the public half with your RunPod account. It's
+   deliberately not your personal/default SSH identity: RunPod pods are
+   reached over SSH for diagnostics only (normal use is the OpenAI
+   endpoint, not an interactive session), the pods themselves are
+   ephemeral (auto-terminate when idle), and a passphrase-free key is
+   what lets `ssh runpod-lab` run non-interactively (e2e test scripts,
+   an agent session, etc.) instead of hanging on a prompt nothing can
+   answer.
 
 ## Cloudflare
 
@@ -120,6 +124,7 @@ overhead); see `lib/launch.sh`'s `PRESET_TABLE` for the exact HF repos.
 | `qwen3-coder-30b-moe` | ~17GB | 24GB (RTX 4090) | 60GB |
 | `qwen2.5-72b` | ~41GB | 48GB (A6000/L40S) | 100GB |
 | `llama3.3-70b` | ~39GB | 48GB (A6000/L40S) | 100GB |
+| `qwen3.5-40b-deckard` | ~40GB (bf16 repo, quantized to FP8 on the fly - no separate quant repo to size for) | 48GB (A6000/L40S) | 100GB |
 | Several presets cached side by side | - | - | 150-200GB |
 | `custom` (any HF repo) | depends on the model | you decide | the launch wizard prompts to grow the volume if needed (RunPod only allows growing, never shrinking, and it's a billed, permanent change) |
 

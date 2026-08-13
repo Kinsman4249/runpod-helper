@@ -4,7 +4,7 @@
 
 # Bump this string whenever a behavior-affecting change lands, so a user
 # pasting output into a bug report gives us something to anchor on.
-RUNPOD_LAB_BUILD="2026.07.30"
+RUNPOD_LAB_BUILD="2026.08.13"
 
 CONFIG_DIR="$HOME/.runpod-lab"
 CONFIG_FILE="$CONFIG_DIR/config"

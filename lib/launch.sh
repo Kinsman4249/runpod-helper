@@ -15,21 +15,57 @@ IMAGE_NAME="ghcr.io/kinsman4249/runpod-helper-image:latest"
 # --- model presets -----------------------------------------------------------
 # Every repo below was confirmed to exist via the HF API
 # (huggingface.co/api/models/<repo>) as of 2026-08-12. Quantization method
-# (AWQ/FP8) is auto-detected by vLLM from each repo's own config.json - no
-# --quantization flag needed. min_vram is a floor (the GPU list is still
-# filtered live against it, same as the old preset system), not a
-# recommendation - a bigger card than the floor buys more KV-cache headroom
-# and lets you push max-model-len higher than the suggested default below.
-# Weight sizes are approximate (param count x ~4 bits/8 bits + overhead).
+# for the AWQ presets is auto-detected by vLLM from each repo's own
+# config.json ("auto" here is literally passed as --quantization auto,
+# vLLM's own default - not a magic value, just makes the flag unconditional
+# for every preset including the on-the-fly ones below). min_vram is a floor
+# (the GPU list is still filtered live against it, same as the old preset
+# system), not a recommendation - a bigger card than the floor buys more
+# KV-cache headroom and lets you push max-model-len higher than the
+# suggested default below. Weight sizes are approximate (param count x
+# ~4-8 bits/byte + overhead).
 #
-# Columns: value | HF repo | served-model-name | min_vram_gb | default max-model-len | label
+# Columns: value | HF repo | served-model-name | min_vram_gb | default max-model-len | quantization | label
 PRESET_TABLE='
-deepseek-r1-distill-32b|casperhansen/deepseek-r1-distill-qwen-32b-awq|deepseek-r1-32b|24|16384|DeepSeek-R1-Distill-Qwen-32B (AWQ, ~19GB) - dense reasoning model
-qwen3-32b|Qwen/Qwen3-32B-AWQ|qwen3-32b|24|16384|Qwen3-32B (AWQ, ~19GB) - dense general-purpose
-qwen3-coder-30b-moe|stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ|qwen3-coder-30b|24|32768|Qwen3-Coder-30B-A3B (AWQ, MoE ~3B active, ~17GB) - the Qwen Code MoE you asked for
-qwen2.5-72b|Qwen/Qwen2.5-72B-Instruct-AWQ|qwen2.5-72b|48|8192|Qwen2.5-72B-Instruct (AWQ, ~41GB) - bigger dense option
-llama3.3-70b|casperhansen/llama-3.3-70b-instruct-awq|llama3.3-70b|48|8192|Llama-3.3-70B-Instruct (AWQ, ~39GB) - non-Qwen/DeepSeek alternative in range
+deepseek-r1-distill-32b|casperhansen/deepseek-r1-distill-qwen-32b-awq|deepseek-r1-32b|24|16384|auto|DeepSeek-R1-Distill-Qwen-32B (AWQ, ~19GB) - dense reasoning model
+qwen3-32b|Qwen/Qwen3-32B-AWQ|qwen3-32b|24|16384|auto|Qwen3-32B (AWQ, ~19GB) - dense general-purpose
+qwen3-coder-30b-moe|stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ|qwen3-coder-30b|24|32768|auto|Qwen3-Coder-30B-A3B (AWQ, MoE ~3B active, ~17GB) - the Qwen Code MoE you asked for
+qwen2.5-72b|Qwen/Qwen2.5-72B-Instruct-AWQ|qwen2.5-72b|48|8192|auto|Qwen2.5-72B-Instruct (AWQ, ~41GB) - bigger dense option
+llama3.3-70b|casperhansen/llama-3.3-70b-instruct-awq|llama3.3-70b|48|8192|auto|Llama-3.3-70B-Instruct (AWQ, ~39GB) - non-Qwen/DeepSeek alternative in range
+qwen3.5-40b-deckard|DavidAU/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking|qwen3.5-40b-deckard|48|8192|fp8|Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking (bf16 repo, on-the-fly FP8, ~40GB) - uncensored, tuned for tool use
 '
+
+# --- GPU listing --------------------------------------------------------
+# Live-fetches GPUs stocked in $DATACENTER_ID meeting a VRAM floor, sorted
+# cheapest-first. Split out of pick_preset_and_gpu's interactive "gpu" step
+# so e2e-test.sh can reuse the exact same fetch/filter/sort logic to pick a
+# GPU non-interactively (cheapest available), instead of hand-rolling a
+# second copy of this jq query that could silently drift from this one.
+# Prints tab-separated rows (gpuId, displayName, memoryInGb, securePricePerHr,
+# stockStatus) to stdout, one per available GPU; prints nothing and returns
+# 1 if none meet the floor.
+list_available_gpus() {
+  local min_vram="$1"
+  local gpu_json
+  gpu_json="$(runpodctl gpu list)" || die "Could not list GPUs - check https://www.runpod.io/console/gpu-cloud instead."
+
+  # Field names (gpuId, displayName, memoryInGb, securePricePerHr,
+  # dataCenterAvailability[].stockStatus) confirmed against live
+  # `runpodctl gpu list` JSON output (2026-07-30, re-checked 2026-08-12).
+  local rows
+  rows="$(jq -r --arg dc "$DATACENTER_ID" --argjson minvram "$min_vram" '
+    .[]
+    | . as $g
+    | ($g.dataCenterAvailability[]? | select(.dataCenterId == $dc) | .stockStatus) as $stock
+    | select($stock != "none")
+    | select($g.memoryInGb >= $minvram)
+    | [$g.gpuId, $g.displayName, ($g.memoryInGb | tostring), ($g.securePricePerHr | tostring), $stock]
+    | @tsv
+  ' <<< "$gpu_json" | sort -t $'\t' -k4 -n)"
+
+  [[ -n "$rows" ]] || return 1
+  printf '%s\n' "$rows"
+}
 
 # --- preset + GPU selection -------------------------------------------------
 
@@ -38,20 +74,25 @@ pick_preset_and_gpu() {
     # shellcheck source=/dev/null
     source "$LAST_SESSION_FILE"
     [[ -n "${MODEL_REPO:-}" && -n "${GPU_ID:-}" && -n "${SERVED_MODEL_NAME:-}" && -n "${MAX_MODEL_LEN:-}" ]] && {
+      # Backward compat: sessions saved before the quantization column
+      # existed have no MODEL_QUANTIZATION at all - "auto" is what every
+      # preset from that era actually ran with (vLLM's own default).
+      MODEL_QUANTIZATION="${MODEL_QUANTIZATION:-auto}"
       log_info "Reusing last session: model=$MODEL_REPO gpu=$GPU_ID max-model-len=$MAX_MODEL_LEN (pass --new to change)."
       return
     }
   fi
 
-  local -a preset_values=() preset_repos=() preset_served_names=() preset_min_vram=() preset_default_ctx=() preset_labels=()
-  local line value repo served min_vram default_ctx label
-  while IFS='|' read -r value repo served min_vram default_ctx label; do
+  local -a preset_values=() preset_repos=() preset_served_names=() preset_min_vram=() preset_default_ctx=() preset_quants=() preset_labels=()
+  local line value repo served min_vram default_ctx quant label
+  while IFS='|' read -r value repo served min_vram default_ctx quant label; do
     [[ -z "$value" ]] && continue
     preset_values+=("$value")
     preset_repos+=("$repo")
     preset_served_names+=("$served")
     preset_min_vram+=("$min_vram")
     preset_default_ctx+=("$default_ctx")
+    preset_quants+=("$quant")
     preset_labels+=("$label")
   done <<< "$PRESET_TABLE"
   preset_values+=("custom")
@@ -63,6 +104,7 @@ pick_preset_and_gpu() {
   # undo by re-running the whole script.
   local step="preset" preset_choice gpu_choice
   local min_vram=0 default_ctx=16384
+  MODEL_QUANTIZATION="auto"
   while true; do
     case "$step" in
       preset)
@@ -77,6 +119,7 @@ pick_preset_and_gpu() {
           SERVED_MODEL_NAME="${preset_served_names[$((preset_choice - 1))]}"
           min_vram="${preset_min_vram[$((preset_choice - 1))]}"
           default_ctx="${preset_default_ctx[$((preset_choice - 1))]}"
+          MODEL_QUANTIZATION="${preset_quants[$((preset_choice - 1))]}"
           step="gpu"
         fi
         ;;
@@ -90,33 +133,19 @@ pick_preset_and_gpu() {
         [[ -n "$SERVED_MODEL_NAME" ]] || die "No served-model-name entered."
         min_vram=0   # unknown model size - show every GPU, you check VRAM fit yourself.
         default_ctx=8192
+        MODEL_QUANTIZATION="auto"   # vLLM auto-detects from the repo's own config.json, same as the built-in AWQ presets.
         log_warn "Custom repo: this script doesn't know its weight size, so the GPU list below isn't filtered by VRAM and the network-volume-size prompt after GPU selection isn't pre-sized either - check the model card yourself before picking."
         step="gpu"
         ;;
       gpu)
         log_info ""
         log_info "Fetching live GPU availability for datacenter $DATACENTER_ID..."
-        local gpu_json
-        gpu_json="$(runpodctl gpu list)" || die "Could not list GPUs - check https://www.runpod.io/console/gpu-cloud instead."
-
-        # Field names (gpuId, displayName, memoryInGb, securePricePerHr,
-        # dataCenterAvailability[].stockStatus) confirmed against live
-        # `runpodctl gpu list` JSON output (2026-07-30, re-checked
-        # 2026-08-12). Filtering to the target datacenter and the preset's
-        # VRAM floor here means a bad pick is no longer possible, instead of
-        # just being warned about.
+        # Filtering to the target datacenter and the preset's VRAM floor
+        # here means a bad pick is no longer possible, instead of just
+        # being warned about.
         local menu_rows
-        menu_rows="$(jq -r --arg dc "$DATACENTER_ID" --argjson minvram "$min_vram" '
-          .[]
-          | . as $g
-          | ($g.dataCenterAvailability[]? | select(.dataCenterId == $dc) | .stockStatus) as $stock
-          | select($stock != "none")
-          | select($g.memoryInGb >= $minvram)
-          | [$g.gpuId, $g.displayName, ($g.memoryInGb | tostring), ($g.securePricePerHr | tostring), $stock]
-          | @tsv
-        ' <<< "$gpu_json" | sort -t $'\t' -k4 -n)"
-
-        [[ -n "$menu_rows" ]] || die "No GPUs meeting the ${min_vram}GB+ VRAM requirement are currently available in datacenter $DATACENTER_ID. Check https://www.runpod.io/console/gpu-cloud."
+        menu_rows="$(list_available_gpus "$min_vram")" \
+          || die "No GPUs meeting the ${min_vram}GB+ VRAM requirement are currently available in datacenter $DATACENTER_ID. Check https://www.runpod.io/console/gpu-cloud."
 
         local -a gpu_ids=() gpu_labels=()
         while IFS=$'\t' read -r gid dname vram price stock; do
@@ -159,8 +188,8 @@ pick_preset_and_gpu() {
 
   mkdir -p "$CONFIG_DIR"
   ( umask 077
-    printf 'MODEL_PRESET=%q\nMODEL_REPO=%q\nSERVED_MODEL_NAME=%q\nGPU_ID=%q\nMAX_MODEL_LEN=%q\n' \
-      "$MODEL_PRESET" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$GPU_ID" "$MAX_MODEL_LEN" > "$LAST_SESSION_FILE"
+    printf 'MODEL_PRESET=%q\nMODEL_REPO=%q\nSERVED_MODEL_NAME=%q\nGPU_ID=%q\nMAX_MODEL_LEN=%q\nMODEL_QUANTIZATION=%q\n' \
+      "$MODEL_PRESET" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$GPU_ID" "$MAX_MODEL_LEN" "$MODEL_QUANTIZATION" > "$LAST_SESSION_FILE"
   )
 }
 
@@ -363,12 +392,12 @@ create_pod() {
   log_info ""
   log_info "Creating pod (GPU $GPU_ID, model $MODEL_REPO, auto-terminate at $terminate_after UTC)..."
 
-  # --env deliberately carries ONLY these seven names - no GitHub credential,
+  # --env deliberately carries ONLY these eight names - no GitHub credential,
   # no git identity: this pod only serves inference, nothing on it edits or
   # commits code anymore.
   local env_json
-  env_json=$(printf '{"CLOUDFLARE_TUNNEL_TOKEN":"%s","MODEL_REPO":"%s","SERVED_MODEL_NAME":"%s","MAX_MODEL_LEN":"%s","VLLM_API_KEY":"%s","IDLE_MINUTES":"%s","RUNPOD_API_KEY":"%s"}' \
-    "$CLOUDFLARE_TUNNEL_TOKEN" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$MAX_MODEL_LEN" "$VLLM_API_KEY" "$IDLE_MINUTES" "$RUNPOD_API_KEY")
+  env_json=$(printf '{"CLOUDFLARE_TUNNEL_TOKEN":"%s","MODEL_REPO":"%s","SERVED_MODEL_NAME":"%s","MAX_MODEL_LEN":"%s","QUANTIZATION":"%s","VLLM_API_KEY":"%s","IDLE_MINUTES":"%s","RUNPOD_API_KEY":"%s"}' \
+    "$CLOUDFLARE_TUNNEL_TOKEN" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$MAX_MODEL_LEN" "${MODEL_QUANTIZATION:-auto}" "$VLLM_API_KEY" "$IDLE_MINUTES" "$RUNPOD_API_KEY")
 
   local create_output
   create_output="$(runpodctl pod create \
@@ -467,5 +496,5 @@ run_normal_launch() {
   log_info "Model name for clients: $SERVED_MODEL_NAME"
   log_info "API key: see $CONFIG_FILE (VLLM_API_KEY) if you don't have it handy."
   log_info "Diagnostics: ssh runpod-lab"
-  log_info "Pod ID: $POD_ID   Model: $MODEL_REPO   Context: $MAX_MODEL_LEN   Idle limit: ${IDLE_MINUTES}m   Max runtime: ${MAX_RUNTIME_HOURS}h"
+  log_info "Pod ID: $POD_ID   Model: $MODEL_REPO   Quantization: ${MODEL_QUANTIZATION:-auto}   Context: $MAX_MODEL_LEN   Idle limit: ${IDLE_MINUTES}m   Max runtime: ${MAX_RUNTIME_HOURS}h"
 }

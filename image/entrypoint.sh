@@ -84,10 +84,17 @@ echo $! > "$RUN_DIR/idle-watchdog.pid"
 # port is deliberately NOT put behind Cloudflare Access - most OpenAI-
 # compatible client tools can set a bearer token but can't add Access's
 # custom CF-Access-Client-Id/Secret headers.
-echo "Starting vllm serve: model=${MODEL_REPO:?MODEL_REPO not set} served-as=${SERVED_MODEL_NAME:?SERVED_MODEL_NAME not set} max-model-len=${MAX_MODEL_LEN:?MAX_MODEL_LEN not set}"
+# QUANTIZATION defaults to "auto" (vLLM's own default: detect from the
+# repo's config.json) for every built-in preset except the ones that need
+# on-the-fly quantization of an unquantized checkpoint (e.g. fp8) - see
+# PRESET_TABLE in ../../lib/launch.sh. Old saved sessions from before this
+# var existed won't set it either, same default applies.
+QUANTIZATION="${QUANTIZATION:-auto}"
+echo "Starting vllm serve: model=${MODEL_REPO:?MODEL_REPO not set} served-as=${SERVED_MODEL_NAME:?SERVED_MODEL_NAME not set} max-model-len=${MAX_MODEL_LEN:?MAX_MODEL_LEN not set} quantization=$QUANTIZATION"
 exec vllm serve "$MODEL_REPO" \
   --host 0.0.0.0 \
   --port 8000 \
   --served-model-name "$SERVED_MODEL_NAME" \
   --max-model-len "$MAX_MODEL_LEN" \
+  --quantization "$QUANTIZATION" \
   --api-key "${VLLM_API_KEY:?VLLM_API_KEY not set}"

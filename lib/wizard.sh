@@ -69,22 +69,32 @@ setup_runpod_api_key() {
   log_ok "RunPod API key validated."
 }
 
-# --- step 3: register local SSH public key --------------------------------
+# --- step 3: generate/register a dedicated SSH keypair for pod access ------
 
+# Deliberately its own keypair, not the user's personal/default identity key,
+# and deliberately generated without a passphrase: the pods this repo creates
+# are ephemeral (idle-watchdog.sh auto-terminates them, see IDLE_MINUTES) and
+# SSH access to them is diagnostics-only, never how the endpoint itself is
+# used - so a passphrase here buys little (there's nothing long-lived behind
+# it worth protecting beyond what's already in $CONFIG_FILE, chmod 600 in the
+# same directory) while actively breaking `ssh runpod-lab` in any
+# non-interactive context (e2e test scripts, an agent session with no way to
+# type a passphrase in) - the actual bug this rewrite fixes.
 setup_ssh_key() {
   log_info ""
-  log_info "== Step 3: SSH public key =="
-  local pub_key=""
-  for candidate in "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_rsa.pub"; do
-    [[ -f "$candidate" ]] && { pub_key="$candidate"; break; }
-  done
-  if [[ -z "$pub_key" ]]; then
-    die "No SSH keypair found (~/.ssh/id_ed25519.pub or id_rsa.pub). Run 'ssh-keygen -t ed25519' yourself and re-run startup.sh --setup. This script will not generate a keypair for you."
+  log_info "== Step 3: SSH key for pod access =="
+  SSH_KEY_PATH="$CONFIG_DIR/ssh_key"
+  if [[ -f "$SSH_KEY_PATH" ]]; then
+    log_info "Reusing existing dedicated keypair at $SSH_KEY_PATH."
+  else
+    ssh-keygen -t ed25519 -N "" -C "runpod-lab" -f "$SSH_KEY_PATH" >/dev/null \
+      || die "ssh-keygen failed to generate $SSH_KEY_PATH."
+    log_ok "Generated a new dedicated (no-passphrase) keypair at $SSH_KEY_PATH."
   fi
-  SSH_KEY_PATH="${pub_key%.pub}"
+  chmod 600 "$SSH_KEY_PATH"
   # Confirmed subcommand: docs.runpod.io/runpodctl/reference/runpodctl-ssh
-  runpodctl ssh add-key --key-file "$pub_key" || die "Failed to register $pub_key with your RunPod account."
-  log_ok "Registered $pub_key with RunPod."
+  runpodctl ssh add-key --key-file "$SSH_KEY_PATH.pub" || die "Failed to register $SSH_KEY_PATH.pub with your RunPod account."
+  log_ok "Registered $SSH_KEY_PATH.pub with RunPod."
 }
 
 # --- step 4: datacenter choice ---------------------------------------------
@@ -365,6 +375,11 @@ run_setup_wizard() {
   log_info "No config found (or --setup was passed) - running the one-time setup wizard."
   log_info "runpod-lab build $RUNPOD_LAB_BUILD"
   mkdir -p "$HOME/.local/bin"
+  # Created here (not just in write_config, the last step) because
+  # setup_ssh_key - step 3, below - needs it to exist first to write the
+  # dedicated keypair into.
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR"
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
     *) log_warn "~/.local/bin isn't on PATH yet - add it to your shell profile, or tools installed this run won't be found until you do." ;;
