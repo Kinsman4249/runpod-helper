@@ -41,25 +41,6 @@ install_runpodctl() {
   log_ok "runpodctl: installed."
 }
 
-install_gh() {
-  command -v gh >/dev/null 2>&1 && { log_info "gh: already present."; return; }
-  local url tmp_dir extracted_bin
-  url="$(github_release_asset_url "cli/cli" 'linux_amd64\.tar\.gz$')"
-  [[ -n "$url" ]] || die "Could not find a linux_amd64 gh release asset. Check https://github.com/cli/cli/releases manually."
-  tmp_dir="$(mktemp -d)"
-  curl -fsSL "$url" -o "$tmp_dir/gh.tar.gz"
-  tar -xzf "$tmp_dir/gh.tar.gz" -C "$tmp_dir"
-  # Don't assume the internal path (e.g. "gh_X.Y.Z_linux_amd64/bin/gh") -
-  # that layout wasn't independently confirmed this session. Find it instead.
-  extracted_bin="$(find "$tmp_dir" -type f -name gh -perm -u+x | head -n1)"
-  [[ -n "$extracted_bin" ]] || die "Downloaded gh release but couldn't find the 'gh' binary inside it. Check $tmp_dir manually."
-  cp "$extracted_bin" "$HOME/.local/bin/gh"
-  chmod +x "$HOME/.local/bin/gh"
-  rm -rf "$tmp_dir"
-  command -v gh >/dev/null 2>&1 || die "gh installed to ~/.local/bin but isn't on PATH. Add ~/.local/bin to PATH and re-run."
-  log_ok "gh: installed."
-}
-
 install_cloudflared() {
   command -v cloudflared >/dev/null 2>&1 && { log_info "cloudflared: already present."; return; }
   # Confirmed URL pattern: developers.cloudflare.com/tunnel/downloads/
@@ -68,16 +49,6 @@ install_cloudflared() {
   chmod +x "$HOME/.local/bin/cloudflared"
   command -v cloudflared >/dev/null 2>&1 || die "cloudflared installed to ~/.local/bin but isn't on PATH. Add ~/.local/bin to PATH and re-run."
   log_ok "cloudflared: installed."
-}
-
-install_gh_token_extension() {
-  require_cmd gh
-  if gh extension list 2>/dev/null | grep -q 'Link-/gh-token'; then
-    log_info "gh-token extension: already present."
-    return
-  fi
-  gh extension install Link-/gh-token || die "Failed to install the gh-token extension (Link-/gh-token). gh may need 'gh auth login' first - that happens in step 6 below."
-  log_ok "gh-token extension: installed."
 }
 
 # --- step 2: RunPod API key ------------------------------------------------
@@ -187,66 +158,31 @@ setup_network_volume() {
   create_network_volume "$vol_name" "$vol_size"
 }
 
-# --- step 6: GitHub App -----------------------------------------------------
+# --- step 6: vLLM API key ---------------------------------------------------
 
-setup_github_app() {
+# Gates the OpenAI-compatible endpoint with a bearer token (vLLM's own
+# --api-key flag - see image/entrypoint.sh). Generated locally, never sent
+# anywhere but into the pod's --env at launch time, same trust model as the
+# other secrets in this file. Deliberately NOT put behind Cloudflare Access
+# the way the SSH hostname is: most OpenAI-compatible client tools (the
+# openai SDK, Continue, Aider, etc.) can set a bearer token but have no way
+# to add Access's custom CF-Access-Client-Id/Secret headers, so Access would
+# make the endpoint unusable from them rather than just gating it.
+setup_vllm_api_key() {
   log_info ""
-  log_info "== Step 6: GitHub App (cannot be automated - one-time manual step) =="
-  log_info "1. Go to: https://github.com/settings/apps/new"
-  log_info "   (or https://github.com/organizations/YOUR_ORG/settings/apps/new for an org)"
-  log_info "2. Leave Callback URL blank - this app never does user OAuth login."
-  log_info "3. Under Webhook, uncheck 'Active' - nothing listens for events, so Webhook URL/Secret can stay empty."
-  log_info "4. Under Repository permissions, set:"
-  log_info "     Contents      -> Read and write"
-  log_info "     Pull requests -> Read and write"
-  log_info "   Leave Organization permissions and Account permissions untouched."
-  log_info "5. Under 'Where can this GitHub App be installed?', choose 'Only on this account'."
-  log_info "6. Create the App, then generate and download a private key (.pem) from the App's settings page."
-  log_info "7. Install the App (top of the App's settings page: 'Install App') on only the specific repos this box should touch."
-  log_info ""
-  read -r -p "Press Enter once the App is created, its key downloaded, and it's installed on the right repos... "
-
-  # app_id/key_path/installation_id all navigate locally (no billed or
-  # otherwise irreversible resource gets created here - 'gh token
-  # installations' is a read-only lookup, safe to re-run). Backing out of
-  # app_id, the first field, hands control to the previous wizard step.
-  local app_id key_path installation_id field="app_id"
-  while true; do
-    case "$field" in
-      app_id)
-        prompt_text "GitHub App ID ($TEXT_BACK_WORD to go back): " app_id || return 1
-        [[ "$app_id" =~ ^[0-9]+$ ]] || die "App ID should be numeric."
-        field="key_path"
-        ;;
-      key_path)
-        prompt_text "Path to the downloaded private key (.pem) ($TEXT_BACK_WORD for App ID): " key_path || { field="app_id"; continue; }
-        key_path="${key_path/#\~/$HOME}"
-        [[ -r "$key_path" ]] || die "Can't read '$key_path'."
-
-        install_gh_token_extension
-        log_info "Looking up installations for this App (no JWT hand-rolling needed -" \
-                 "gh-token's 'installations' subcommand signs the JWT itself)..."
-        log_info "Check the 'repository_selection' field in the output below: if it says" \
-                 "'all' instead of 'selected', the App got installed on every repo instead" \
-                 "of just the ones this box should touch. Fix it at" \
-                 "https://github.com/settings/installations/<id> (Repository access ->" \
-                 "Only select repositories) before continuing."
-        gh token installations --key "$key_path" --app-id "$app_id" || die "gh-token couldn't list installations - check the App ID and key path."
-        echo
-        field="installation_id"
-        ;;
-      installation_id)
-        prompt_text "Paste the installation ID matching where you installed the App above ($TEXT_BACK_WORD for key path): " installation_id || { field="key_path"; continue; }
-        [[ "$installation_id" =~ ^[0-9]+$ ]] || die "Installation ID should be numeric."
-        break
-        ;;
-    esac
-  done
-
-  GITHUB_APP_ID="$app_id"
-  GITHUB_APP_KEY_PATH="$key_path"
-  GITHUB_APP_INSTALLATION_ID="$installation_id"
-  log_ok "GitHub App configured."
+  log_info "== Step 6: OpenAI-endpoint API key =="
+  log_info "This gates the vLLM endpoint itself (Authorization: Bearer <key>) - it's" \
+           "what your OpenAI-compatible client tools authenticate with, since the" \
+           "endpoint's Public Hostname (next step) is intentionally not behind" \
+           "Cloudflare Access."
+  local reply
+  prompt_text "Paste your own key, or leave blank to generate a random one ($TEXT_BACK_WORD to go back): " reply || return 1
+  if [[ -z "$reply" ]]; then
+    reply="$(openssl rand -hex 32)"
+    log_info "Generated a random key (will be shown once more in the final config summary)."
+  fi
+  VLLM_API_KEY="$reply"
+  log_ok "vLLM API key set."
 }
 
 # --- step 7: Cloudflare Tunnel ----------------------------------------------
@@ -271,53 +207,60 @@ setup_cloudflare_tunnel() {
   log_info "     Path:      leave blank"
   log_info "     Type:      SSH"
   log_info "     URL:       localhost:22"
-  log_info "5. Add a second Public Hostname on the same tunnel for the OpenHands UI:"
-  log_info "     Subdomain: whatever you want, e.g. 'pod-ui'"
+  log_info "5. Add a second Public Hostname on the same tunnel for the OpenAI-compatible"
+  log_info "   API (fixed at port 8000 - that's vLLM's own documented default, not"
+  log_info "   configurable per launch the way the old frontend port was):"
+  log_info "     Subdomain: whatever you want, e.g. 'pod-api'"
   log_info "     Domain:    same domain as above"
   log_info "     Type:      HTTP"
-  log_info "     URL:       localhost:<OpenHands port> (default OpenHands port is 3000,"
-  log_info "                unconfirmed until the paired OpenHands image is finalized -"
-  log_info "                check that image's docs/config before relying on 3000)."
-  log_info "6. Lock both hostnames down with Cloudflare Access so only you can reach"
-  log_info "   them (RunPod pods are otherwise open to anyone who guesses the URL):"
+  log_info "     URL:       localhost:8000"
+  log_info "6. Lock the SSH hostname down with Cloudflare Access so only you can reach"
+  log_info "   it (RunPod pods are otherwise open to anyone who guesses the URL). The"
+  log_info "   API hostname is deliberately left OUT of this Access application - it's"
+  log_info "   gated by vLLM's own --api-key bearer token instead (Step 6 above),"
+  log_info "   since most OpenAI-compatible client tools can send a bearer token but"
+  log_info "   can't add Access's custom CF-Access-Client-Id/Secret headers:"
   log_info "     a. Go to Zero Trust > Access > Applications > Add an application. On"
   log_info "        the type-picker modal, stay on the 'Self-hosted and private' tab"
   log_info "        (ignore the Private destinations/Workers/Public DNS/Service auth"
   log_info "        sub-tabs shown as examples) and click 'Continue with Self-hosted"
   log_info "        and private'."
   log_info "     b. On the Destinations section: under 'Public hostnames', enter the"
-  log_info "        SSH subdomain from step 4 (Subdomain field) with your domain"
-  log_info "        already selected, Path left blank. Click '+ Add public hostname'"
-  log_info "        and add a second entry with the OpenHands subdomain from step 5."
-  log_info "        (One app supports up to 5 destinations, so both hostnames can"
-  log_info "        share this single Access application.) Ignore the 'Workers'"
-  log_info "        section - that's unrelated to this tunnel."
+  log_info "        SSH subdomain from step 4, with your domain already selected and"
+  log_info "        Path left blank. Do NOT add the API subdomain here."
   log_info "     c. Add a policy (e.g. name it 'me-only', action Allow) with an Include"
   log_info "        rule of type Emails, listing your own GitHub/Cloudflare email."
   log_info "     d. Save."
-  log_info "   Without this, anything listening on localhost:22 or the OpenHands port"
-  log_info "   is reachable by anyone on the internet who finds the hostname."
-  log_info "7. Sanity check: on the tunnel's 'Routes' tab, both hostnames should be"
-  log_info "   listed with a 'Published application' badge next to them - that badge is"
-  log_info "   what confirms the Access policy from step 6 is actually attached. If a"
-  log_info "   hostname is missing that badge, its Access application wasn't saved"
-  log_info "   correctly - go back and fix it before continuing."
+  log_info "   Without this, localhost:22 is reachable by anyone who finds the SSH"
+  log_info "   hostname. The API hostname is intentionally reachable by anyone who"
+  log_info "   finds it AND has the API key - if that's not an acceptable tradeoff for"
+  log_info "   you, add a second Access application covering it too and expect to lose"
+  log_info "   compatibility with OpenAI-client tools that can't add Access headers."
+  log_info "7. Sanity check: on the tunnel's 'Routes' tab, the SSH hostname should be"
+  log_info "   listed with a 'Published application' badge next to it - that badge is"
+  log_info "   what confirms the Access policy from step 6 actually attached. The API"
+  log_info "   hostname should NOT have that badge (by design, per step 6)."
   log_info ""
-  read -r -p "Press Enter once the tunnel, both hostnames, and the Access policy exist... "
+  read -r -p "Press Enter once the tunnel, both hostnames, and the SSH Access policy exist... "
 
   # Nothing here creates or commits anything server-side (the tunnel/
-  # hostnames/policy were already made manually above), so both fields
-  # navigate locally and backing out of hostname (the first) exits the step.
-  local field="hostname"
+  # hostnames/policy were already made manually above), so all three fields
+  # navigate locally and backing out of ssh_hostname (the first) exits the step.
+  local field="ssh_hostname"
   while true; do
     case "$field" in
-      hostname)
+      ssh_hostname)
         prompt_text "SSH hostname (e.g. pod-ssh.yourdomain.com) ($TEXT_BACK_WORD to go back): " CLOUDFLARE_SSH_HOSTNAME || return 1
         [[ -n "$CLOUDFLARE_SSH_HOSTNAME" ]] || die "No SSH hostname entered."
+        field="api_hostname"
+        ;;
+      api_hostname)
+        prompt_text "API hostname (e.g. pod-api.yourdomain.com) ($TEXT_BACK_WORD for SSH hostname): " CLOUDFLARE_API_HOSTNAME || { field="ssh_hostname"; continue; }
+        [[ -n "$CLOUDFLARE_API_HOSTNAME" ]] || die "No API hostname entered."
         field="token"
         ;;
       token)
-        prompt_text "Paste the tunnel token, or the whole install/run command Cloudflare showed ($TEXT_BACK_WORD for hostname): " CLOUDFLARE_TUNNEL_TOKEN -s || { field="hostname"; continue; }
+        prompt_text "Paste the tunnel token, or the whole install/run command Cloudflare showed ($TEXT_BACK_WORD for API hostname): " CLOUDFLARE_TUNNEL_TOKEN -s || { field="api_hostname"; continue; }
         CLOUDFLARE_TUNNEL_TOKEN="$(extract_cloudflare_token "$CLOUDFLARE_TUNNEL_TOKEN")"
         [[ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]] || die "No tunnel token found in what was pasted."
         validate_cloudflare_tunnel_token
@@ -355,49 +298,24 @@ setup_ssh_config() {
   log_ok "Wrote 'Host runpod-lab' to ~/.ssh/config (ssh/scp/rsync all work against that alias from now on)."
 }
 
-# --- step 9: git identity ---------------------------------------------------
-
-setup_git_identity() {
-  log_info ""
-  log_info "== Step 9: git identity (used inside the pod, passed via --env) =="
-  local field="name"
-  while true; do
-    case "$field" in
-      name)
-        prompt_text "git user.name ($TEXT_BACK_WORD to go back): " GIT_USER_NAME || return 1
-        field="email"
-        ;;
-      email)
-        prompt_text "git user.email ($TEXT_BACK_WORD for user.name): " GIT_USER_EMAIL || { field="name"; continue; }
-        [[ -n "$GIT_USER_NAME" && -n "$GIT_USER_EMAIL" ]] || die "Both git user.name and user.email are required."
-        break
-        ;;
-    esac
-  done
-}
-
-# --- step 10: write config --------------------------------------------------
+# --- step 9: write config --------------------------------------------------
 
 write_config() {
   mkdir -p "$CONFIG_DIR"
   chmod 700 "$CONFIG_DIR"
   # Written with a restrictive umask for the duration of this call so the
   # file is never briefly world-readable between creation and chmod, and
-  # %q-quoted so a value containing spaces or shell metacharacters (e.g. a
-  # GITHUB_APP_KEY_PATH through a directory with a space in its name) can't
+  # %q-quoted so a value containing spaces or shell metacharacters can't
   # break `source "$CONFIG_FILE"` later.
   ( umask 077
     printf 'RUNPOD_API_KEY=%q\n' "$RUNPOD_API_KEY" > "$CONFIG_FILE"
     printf 'SSH_KEY_PATH=%q\n' "$SSH_KEY_PATH" >> "$CONFIG_FILE"
     printf 'DATACENTER_ID=%q\n' "$DATACENTER_ID" >> "$CONFIG_FILE"
     printf 'NETWORK_VOLUME_ID=%q\n' "$NETWORK_VOLUME_ID" >> "$CONFIG_FILE"
-    printf 'GITHUB_APP_ID=%q\n' "$GITHUB_APP_ID" >> "$CONFIG_FILE"
-    printf 'GITHUB_APP_KEY_PATH=%q\n' "$GITHUB_APP_KEY_PATH" >> "$CONFIG_FILE"
-    printf 'GITHUB_APP_INSTALLATION_ID=%q\n' "$GITHUB_APP_INSTALLATION_ID" >> "$CONFIG_FILE"
+    printf 'VLLM_API_KEY=%q\n' "$VLLM_API_KEY" >> "$CONFIG_FILE"
     printf 'CLOUDFLARE_SSH_HOSTNAME=%q\n' "$CLOUDFLARE_SSH_HOSTNAME" >> "$CONFIG_FILE"
+    printf 'CLOUDFLARE_API_HOSTNAME=%q\n' "$CLOUDFLARE_API_HOSTNAME" >> "$CONFIG_FILE"
     printf 'CLOUDFLARE_TUNNEL_TOKEN=%q\n' "$CLOUDFLARE_TUNNEL_TOKEN" >> "$CONFIG_FILE"
-    printf 'GIT_USER_NAME=%q\n' "$GIT_USER_NAME" >> "$CONFIG_FILE"
-    printf 'GIT_USER_EMAIL=%q\n' "$GIT_USER_EMAIL" >> "$CONFIG_FILE"
   )
   chmod 600 "$CONFIG_FILE"
   # Confirm by presence/length only - never echo the values themselves.
@@ -406,9 +324,12 @@ write_config() {
 
 # --- --rotate: quick credential refresh --------------------------------------
 
-# Re-prompts for just the two credentials that actually expire/rotate outside
+# Re-prompts for just the credentials that actually expire/rotate outside
 # this repo (RunPod API key, Cloudflare tunnel token), instead of re-running
-# the whole wizard (SSH key, GitHub App, etc. don't need touching for that).
+# the whole wizard (SSH key, etc. don't need touching for that). The vLLM
+# API key doesn't expire (it's generated by us, not issued externally), so
+# it isn't part of this - edit VLLM_API_KEY in $CONFIG_FILE by hand, or
+# re-run --setup, if you want to change it.
 # Requires the rest of the config to already be sourced by the caller.
 rotate_credentials() {
   log_info "Rotating credentials in $CONFIG_FILE. Leave a prompt blank to keep the current value."
@@ -452,30 +373,30 @@ run_setup_wizard() {
   log_info ""
   log_info "== Step 1: local tools =="
   install_runpodctl
-  install_gh
   install_cloudflared
-  install_gh_token_extension
+  command -v openssl >/dev/null 2>&1 || die "openssl not found on PATH - needed to generate the vLLM API key (setup_vllm_api_key). Install it via your distro's package manager; this repo doesn't auto-install it (it's a near-universal base-system tool, unlike the release binaries above)."
 
-  # Steps 2-9 run as a back-able sequence: any step can return 1 (e.g. the
+  # Steps 2-8 run as a back-able sequence: any step can return 1 (e.g. the
   # user typed the safeword on its first prompt) to hand control to the
   # step before it, instead of the whole wizard only being restartable from
   # scratch. setup_ssh_key and setup_ssh_config have no prompts of their own
   # (they just re-run their side effects) but stay in the list so stepping
-  # back past setup_datacenter/setup_git_identity lands somewhere sensible.
+  # back past setup_datacenter lands somewhere sensible.
   local -a wizard_steps=(
     setup_runpod_api_key
     setup_ssh_key
     setup_datacenter
     setup_network_volume
-    setup_github_app
+    setup_vllm_api_key
     setup_cloudflare_tunnel
     setup_ssh_config
-    setup_git_identity
   )
   run_step_sequence wizard_steps
   write_config
 
   log_info ""
   log_ok "Setup complete. Run ./startup.sh again (without --setup) to launch a pod."
+  log_info "Your OpenAI-compatible endpoint will be: https://$CLOUDFLARE_API_HOSTNAME/v1"
+  log_info "API key (Authorization: Bearer <key> - shown once, not stored anywhere but $CONFIG_FILE): $VLLM_API_KEY"
   log_info "PREREQUISITES.md in this repo documents everything this wizard just asked for - if that list and this wizard ever disagree, the wizard wins and the doc needs an update."
 }

@@ -1,95 +1,136 @@
 # runpod-helper
 
-One-time-setup, mostly-hands-off tooling to run OpenHands (or a plain
-chat frontend) against llama.cpp on a rented RunPod Secure Cloud GPU pod,
-with the code disk destroyed every session and nothing long-lived stored
-on RunPod's side.
+One-time-setup, mostly-hands-off tooling to run a self-hosted,
+OpenAI-compatible LLM inference endpoint on a rented RunPod Secure Cloud
+GPU pod, reachable at a stable Cloudflare hostname regardless of which
+pod instance is currently backing it, with nothing long-lived stored on
+RunPod's side beyond the model-weights cache.
 
 ## What this does
 
 - `startup.sh` (runs on your own machine): pick a GPU tier and model
-  preset once, then silently reuse that choice on every future run
-  (`--new` to change it). Creates the RunPod Secure Cloud pod, attaches
-  the persistent model-weights volume, waits for the Cloudflare
-  Tunnel/SSH path to come up, then mints a short-lived GitHub App
-  installation token locally and pushes it into the pod over SSH. No
-  GitHub credential ever touches RunPod's stored pod config.
-- `onstart.sh` (runs once when the pod boots): installs `gh`
-  (unauthenticated - auth arrives later over SSH), starts the Cloudflare
-  Tunnel, and launches the idle watchdog.
-- `idle-watchdog.sh` + `safety-commit.sh` (run inside the pod): after a
-  configurable idle period with no active SSH session, commit and push
-  any uncommitted work to a timestamped safety branch, then stop and
-  delete the pod.
-- Model serving: llama.cpp (`llama-server`), not Ollama, so
-  quantization, KV-cache type, and speculative decoding are all directly
-  configurable. Two presets: a dense Qwen3.6-27B build with MTP
-  speculative decoding on by default, and a Qwen3-Coder-Next (MoE) build
-  for larger-context/quality work on bigger cards, without assuming
-  speculative decoding helps there.
-- OpenHands runs in Local Runtime mode (no Docker - RunPod Pods can't
-  nest containers anyway), accepting the reduced sandbox isolation
-  specifically because the code disk this runs on is destroyed every
-  session.
-- Frontend is a per-launch choice, not fixed: the pod image
-  (`image/Dockerfile`) ships OpenHands, llama.cpp's own built-in chat UI,
-  and Open WebUI side by side, but only ever runs one at a time - whichever
-  `FRONTEND` you pick in the wizard - on port 3000, the one port forwarded
-  through the Cloudflare tunnel. Switching frontends just means picking a
-  different option on the next `./startup.sh --new` launch, no rebuild.
+  once, then silently reuse that choice on every future run (`--new` to
+  change it). Creates the RunPod Secure Cloud pod, attaches the
+  persistent model-weights volume, waits for the Cloudflare Tunnel/SSH
+  path to come up, then polls the OpenAI-compatible endpoint itself
+  until vLLM has finished loading the model and is actually serving.
+- Model serving: [vLLM](https://docs.vllm.ai)'s own official
+  `vllm/vllm-openai` image, run directly rather than a custom-built
+  image - it's the same image RunPod's own community "vLLM" pod
+  templates all wrap, so it's typically already cache-warm on RunPod's
+  nodes. `image/Dockerfile` only adds the thin layer needed to reach it
+  through a stable hostname: `cloudflared`, `runpodctl`, and `sshd`
+  (diagnostics only).
+- Five built-in model presets in the 30-90B range (AWQ/FP8-quantized so
+  they fit a single GPU): DeepSeek-R1-Distill-Qwen-32B, Qwen3-32B,
+  Qwen3-Coder-30B-A3B (MoE), Qwen2.5-72B-Instruct, and
+  Llama-3.3-70B-Instruct - plus a `custom` option to paste any Hugging
+  Face repo id, with a prompt to grow the network volume if it needs
+  more room than the presets assume. See `lib/launch.sh`'s
+  `PRESET_TABLE` for the exact repos and VRAM floors.
+- `image/entrypoint.sh` (the pod image's `ENTRYPOINT`, runs every boot):
+  starts `sshd` and the Cloudflare Tunnel, fetches and starts
+  `idle-watchdog.sh` fresh from this repo's `main` branch (so a fix
+  there applies without an image rebuild), then execs into
+  `vllm serve` - gated with a bearer-token API key (vLLM's own
+  `--api-key` flag), since the endpoint's Public Hostname is
+  deliberately not put behind Cloudflare Access (most OpenAI-compatible
+  client tools can send a bearer token but can't add Access's custom
+  headers).
+- `idle-watchdog.sh` (runs on the pod): after a configurable idle
+  period with zero vLLM request activity (polled via vLLM's own
+  `/metrics` endpoint), stops and deletes the pod via the RunPod API -
+  the actual cost-control mechanism for the whole design (the
+  `--terminate-after` flag `startup.sh` sets at pod-create time is a
+  second, independent backstop in case this process itself hangs or
+  crashes).
+- A cheap CPU pod can pre-download a model's weights onto the network
+  volume (`--prewarm` / `--prewarm-only`) before the expensive GPU pod
+  ever boots, since the download is pure network/CPU-bound work.
 
 ## Why
 
 - RunPod Secure Cloud was picked for predictable, zero-egress billing
   (RunPod's own datacenters, not third-party community hosts).
-- Nothing long-lived sits on RunPod's platform: no PAT in `--env`, no
-  static secret in the pod's stored config. The only long-lived
-  credential (a GitHub App private key) stays on the local machine; only
-  a short-lived (about one hour) installation token ever reaches the
-  pod.
-- Code and secrets that actually matter never live on the rented box at
-  all; they stay on the local machine. The pod's code disk existing only
-  per-session is a feature here, not a limitation.
+- Model weights live on the network volume (`HF_HOME`), not the
+  container disk - a pod recreated after being idled out doesn't
+  re-download anything, it just reattaches the same volume.
+- No custom-built inference image to maintain: `vllm/vllm-openai` is
+  vLLM's own official image, tracking their releases directly.
 
 ## Status
 
-All five scripts (`startup.sh`, `onstart.sh`, `idle-watchdog.sh`,
-`safety-commit.sh`, plus the `lib/` helpers `startup.sh` sources) are
-written and pass `bash -n`, and `IMAGE_NAME` in `lib/launch.sh` now
-points at a real image (`image/Dockerfile`, published by
-`.github/workflows/build-image.yml`) instead of the old generic
-placeholder. None of this has been run against a real pod yet, though -
-the first live launch attempt caught the placeholder-image gap (no
-`onstart.sh` baked in, so `cloudflared` never started) before the image
-existed; that's now fixed, but the actual image hasn't been built/pushed
-or exercised on a pod. The SSH idle-detection method in
-`idle-watchdog.sh` also hasn't been verified against a real
-cloudflared-proxied session yet - see the caveat comment at the top of
-that file.
+This is a from-scratch pivot (2026-08-12) away from an earlier
+llama.cpp + OpenHands design - see `handoff.md` for that history. All
+scripts pass `bash -n`, but none of this pivot has been run against a
+real pod yet: the exact `vllm serve` flags, the `/metrics` field names
+`idle-watchdog.sh` relies on, the pod image's actual pull size vs.
+`CONTAINER_DISK_GB`, and the Cloudflare Public Hostname setup are all
+believed-correct from vLLM/RunPod/Cloudflare docs, not yet confirmed
+live. Treat the first `./startup.sh` run as the real test.
 
 ## Setup
 
 First run: `./startup.sh` detects there's no local config yet and walks
 you through a one-time setup wizard - installing the local tools it
 needs, taking your RunPod API key, creating the model-weights volume,
-and pausing at the right moments for the GitHub App and Cloudflare Tunnel
-steps that have to happen on those sites directly.
+generating the vLLM endpoint's API key, and pausing at the right moment
+for the Cloudflare Tunnel step that has to happen on their site
+directly.
 
-Every run after that: GPU tier and model preset are picked once and
-silently reused from then on (`--new` to change them), and everything
-else - the pod, the tunnel, GitHub auth, shutdown - just happens.
+Every run after that: GPU tier and model are picked once and silently
+reused from then on (`--new` to change them), and everything else - the
+pod, the tunnel, shutdown - just happens.
 
 See [PREREQUISITES.md](./PREREQUISITES.md) for the itemized list of what
-needs to exist on RunPod, Cloudflare, and GitHub before that first run,
-including datacenter privacy tradeoffs and GPU/volume sizing guidance
-for the two model presets.
+needs to exist on RunPod and Cloudflare before that first run, including
+datacenter privacy tradeoffs and GPU/volume sizing guidance for each
+model preset.
+
+## Using the endpoint
+
+Once a pod is up, `startup.sh` prints the endpoint URL, the model name
+to request, and where to find the API key. Point any OpenAI-compatible
+client at it:
+
+```
+base_url: https://<your-api-hostname>/v1
+api_key:  <VLLM_API_KEY from ~/.runpod-lab/config>
+model:    <served-model-name from the launch summary, e.g. "qwen3-32b">
+```
+
+`<your-api-hostname>` is the API subdomain you chose under **your own
+Cloudflare domain** during setup (e.g. `pod-api.yourdomain.com`) - not
+a `runpod.net`/`runpod.io` address. It's stable across pod recreations:
+same hostname every launch, because it's the Cloudflare Tunnel's Public
+Hostname route, not tied to any particular pod's IP. Only the model
+actually running behind it changes when you `--new` to a different
+preset.
+
+Quick check with curl:
+
+```sh
+curl https://<your-api-hostname>/v1/chat/completions \
+  -H "Authorization: Bearer <VLLM_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "<served-model-name>", "messages": [{"role": "user", "content": "hello"}]}'
+```
+
+Or with the `openai` Python SDK (or any tool that lets you set a custom
+`base_url`, e.g. Continue, Aider):
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="https://<your-api-hostname>/v1", api_key="<VLLM_API_KEY>")
+client.chat.completions.create(model="<served-model-name>", messages=[{"role": "user", "content": "hello"}])
+```
 
 ## Testing
 
 Manual, for now: run `startup.sh`, confirm the pod comes up, confirm
-`gh auth status` succeeds on the pod after the SSH push step, and
-confirm the idle watchdog fires a safety commit and shuts the pod down
-after the configured idle window with no SSH session open.
+`curl` against the printed endpoint returns a real completion, and
+confirm the idle watchdog fires and shuts the pod down after the
+configured idle window with no request activity.
 
 ## License
 

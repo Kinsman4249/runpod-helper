@@ -2,9 +2,10 @@
 # startup.sh - runs on your own machine, not on the pod.
 #
 # First run (or --setup): walks through the one-time setup wizard.
-# Every run after that: reuses last session's GPU/preset choice (unless
-# --new is passed), creates a RunPod Secure Cloud pod, waits for it to be
-# reachable, and pushes a short-lived GitHub token into it over SSH.
+# Every run after that: reuses last session's GPU/model choice (unless
+# --new is passed), creates a RunPod Secure Cloud pod running vLLM, and
+# waits for the OpenAI-compatible endpoint to actually respond through the
+# Cloudflare tunnel.
 #
 # See PREREQUISITES.md for what has to exist before the wizard can run.
 set -euo pipefail
@@ -32,13 +33,14 @@ Usage: $0 [--setup] [--rotate] [--new] [--prewarm] [--prewarm-only] [--idle-minu
   --setup                 Force the first-run setup wizard, even if config exists.
   --rotate                Re-paste the RunPod API key and/or Cloudflare tunnel token
                            (whichever got rotated) without redoing the rest of setup.
-  --new                   Re-pick GPU/model preset instead of reusing the last session.
-  --prewarm                Force a toolchain/model prewarm run on a cheap CPU pod even if
-                           this volume is already marked prewarmed, then continue to the
-                           normal GPU pod launch (see lib/launch.sh).
+  --new                   Re-pick GPU/model instead of reusing the last session.
+  --prewarm                Force a model-weights prewarm run on a cheap CPU pod even if
+                           this volume is already marked prewarmed for this model, then
+                           continue to the normal GPU pod launch (see lib/launch.sh).
   --prewarm-only           Run the prewarm (forced) and stop - no GPU pod gets created.
                            Useful for "warm the volume now, launch the real pod later".
-  --idle-minutes N        Minutes with no SSH session before the pod auto-shuts-down (default 20).
+  --idle-minutes N        Minutes with no vLLM request activity before the pod
+                           auto-shuts-down (default 20).
   --max-runtime-hours N   Hard wall-clock cap on the pod's lifetime, regardless of activity (default 4).
 EOF
 }
@@ -79,7 +81,6 @@ export RUNPOD_API_KEY
 # readable, whether from a tool's own umask or a browser download, on every
 # run (not just at setup) so a permission regression doesn't sit unnoticed.
 secure_file "$SSH_KEY_PATH"
-secure_file "$GITHUB_APP_KEY_PATH"
 secure_file "$HOME/.runpod/config.toml"
 
 if [[ "$ROTATE" == 1 ]]; then

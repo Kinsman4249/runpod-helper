@@ -2,10 +2,10 @@
 
 Everything below needs to exist before you run `startup.sh` for the
 first time. The setup wizard in `startup.sh` handles almost everything
-else - installing local tools, creating the network volume, walking you
-through the GitHub App and Cloudflare steps - so this list is only what
-has to happen on each service's own website before the wizard can take
-over.
+else - installing local tools, creating the network volume, generating
+the vLLM API key, walking you through the Cloudflare steps - so this
+list is only what has to happen on each service's own website before
+the wizard can take over.
 
 ## RunPod
 
@@ -18,9 +18,10 @@ over.
    everything after that.
 4. Have an SSH keypair on your machine (`ls ~/.ssh/id_ed25519.pub`, or
    `ssh-keygen -t ed25519` if you don't have one). RunPod pods are
-   reached over SSH and the public key has to be registered on your
-   RunPod account. The wizard can register it for you, but the keypair
-   itself has to exist first.
+   reached over SSH (diagnostics only - normal use is the OpenAI
+   endpoint, not an interactive session) and the public key has to be
+   registered on your RunPod account. The wizard can register it for
+   you, but the keypair itself has to exist first.
 
 ## Cloudflare
 
@@ -31,84 +32,59 @@ over.
    domain in Cloudflare, there's nothing for a named Tunnel to attach
    to.
 3. Nothing else ahead of time. The wizard pauses with the exact console
-   steps for creating the named Tunnel, adding two Public Hostname routes
-   on it (one for SSH -> `localhost:22`, one for the frontend (OpenHands,
-   llama.cpp's built-in UI, or Open WebUI, whichever you pick at launch)
-   -> `localhost:3000`), and setting up an Access policy covering both,
-   then asks you to paste back the SSH hostname and the tunnel token.
+   steps for creating the named Tunnel and adding two Public Hostname
+   routes on it: one for SSH -> `localhost:22`, one for the OpenAI-
+   compatible API -> `localhost:8000` (fixed - that's vLLM's own
+   documented default port, not something you choose per launch the way
+   the old frontend port was).
 
    In brief, what that involves: Networking > Tunnels > Create a tunnel
    (Cloudflared connector, named, not the quick/trycloudflare kind) ->
-   copy the tunnel token from the install command shown (or later from the
-   tunnel's Overview page) -> add the two Public Hostname routes described
-   above under the tunnel's "Public Hostname" tab -> then, under Zero Trust
-   > Access > Applications, add an application, stay on the "Self-hosted
-   and private" tab of the type-picker modal (the Private
-   destinations/Workers/Public DNS/Service auth sub-tabs there are just
-   examples, not choices you need to make) and click "Continue with
-   Self-hosted and private" -> on the Destinations section, add the SSH
-   subdomain as a public hostname, then click "+ Add public hostname" to
-   add the frontend subdomain too (one app supports up to 5 destinations,
-   so a single Access application can cover both; ignore the unrelated
-   "Workers" section) -> add a policy that allows only your own email ->
-   save. Skipping the Access step leaves localhost:22 and the frontend
-   reachable by anyone who finds the hostname. Sanity check on the
-   tunnel's "Routes" tab afterward: both hostnames should show a
-   "Published application" badge, confirming the Access policy actually
-   attached to them - if either is missing the badge, go back and fix
-   that hostname's Access application before continuing.
+   copy the tunnel token from the install command shown (or later from
+   the tunnel's Overview page) -> add the two Public Hostname routes
+   described above under the tunnel's "Public Hostname" tab -> then,
+   under Zero Trust > Access > Applications, add an application, stay
+   on the "Self-hosted and private" tab of the type-picker modal (the
+   Private destinations/Workers/Public DNS/Service auth sub-tabs there
+   are just examples, not choices you need to make) and click "Continue
+   with Self-hosted and private" -> on the Destinations section, add
+   **only the SSH subdomain** as a public hostname -> add a policy that
+   allows only your own email -> save.
 
-   Direct links, once you know your account ID and tunnel ID (both appear
-   in the address bar once you're on the relevant page - swap them into
-   the placeholders below to jump straight there next time instead of
-   digging through the dashboard nav):
+   The API hostname is deliberately left OUT of that Access
+   application. It's gated by vLLM's own `--api-key` bearer-token auth
+   instead (the wizard generates this for you), because most OpenAI-
+   compatible client tools (the `openai` SDK, Continue, Aider, and
+   similar) can send a bearer token but have no way to add Access's
+   custom `CF-Access-Client-Id`/`Secret` headers - putting it behind
+   Access would make the endpoint unusable from them rather than just
+   gating it. This is a real tradeoff, not a default to blindly accept:
+   the API hostname is reachable by anyone who finds it **and** has the
+   API key, not locked to your own identity the way SSH is. If that's
+   not acceptable for your threat model, add a second Access
+   application covering the API hostname too, and expect to lose
+   compatibility with client tools that can't set custom headers.
+
+   Direct links, once you know your account ID and tunnel ID (both
+   appear in the address bar once you're on the relevant page - swap
+   them into the placeholders below to jump straight there next time
+   instead of digging through the dashboard nav):
      - Tunnel overview (token, routes): `https://dash.cloudflare.com/<account-id>/tunnels/<tunnel-id>/overview`
      - Access policies: `https://dash.cloudflare.com/<account-id>/one/access-controls/policies`
 
-   Port 3000 is fixed regardless of which frontend you pick at launch
-   (`openhands` / `llama-webui` / `open-webui`, see `lib/launch.sh`'s
-   `pick_preset_and_gpu()`) - `image/entrypoint.sh` always binds whichever
-   one is chosen to that port, so the second Public Hostname route above
-   never needs to change when you switch frontends between launches.
-
-## GitHub
-
-1. Have a GitHub account with access to whichever repos this box should
-   be able to push to.
-2. Nothing else ahead of time. The wizard pauses and walks you through
-   creating the GitHub App (Contents: Read and write, Pull requests: Read
-   and write, installed only on the specific repos this box should touch),
-   generating and downloading its private key, then asks you to confirm the
-   App ID and the key file path. It looks up the installation ID for you
-   automatically (via the `gh-token` extension's `installations` command,
-   using the key you just gave it) rather than asking you to hunt for that
-   number yourself - you just confirm which installation it found.
-
-   The app is only ever used to mint installation tokens for git push/PR
-   operations - it never receives inbound events. So on the "New GitHub
-   App" form: leave Callback URL blank, and uncheck Webhook > Active
-   (leaving Webhook URL/Secret empty is fine once it's inactive).
-
-   When the wizard looks up the installation, check the
-   `repository_selection` field in its output: it should say `selected`,
-   not `all`. If it says `all`, the App got installed on every repo
-   instead of just the ones this box should touch - fix it at
-   `https://github.com/settings/installations/<id>` (Repository access ->
-   Only select repositories) before continuing.
-
 ## Local machine
 
-1. `bash`, `ssh`, `curl`, `tar`, and `git`. All standard on any Linux or
-   macOS install, Bazzite included.
+1. `bash`, `ssh`, `curl`, `openssl`. All standard on any Linux or macOS
+   install, Bazzite included.
 2. `~/.local/bin` on your `PATH`. Default on Fedora-family systems
    including Bazzite; check with `echo $PATH` if unsure. The wizard
    installs its tools there.
-3. Everything else - `runpodctl`, `gh`, the `gh-token` gh extension, and
-   `cloudflared` - is installed by the wizard as user-level binaries
-   (downloaded release binaries into `~/.local/bin`). No `sudo`, no
-   package manager, no reboot. (`cloudflared` is needed locally, not just
-   on the pod: it's what your SSH client proxies through to reach the pod
-   without any open inbound ports, via `cloudflared access ssh`.)
+3. `runpodctl` and `cloudflared` are installed by the wizard as
+   user-level binaries (downloaded release binaries into
+   `~/.local/bin`). No `sudo`, no package manager, no reboot.
+   `cloudflared` is only needed locally to validate the tunnel token
+   during setup - the pod itself runs its own `cloudflared`, not this
+   one.
 
 ## One thing to decide before you start
 
@@ -117,7 +93,7 @@ only be attached to pods in that same datacenter. That choice
 constrains which GPUs are available to you later, since not every
 datacenter stocks every card. The wizard will ask which datacenter to
 use - if you already know you want a specific GPU tier (e.g. a 48GB card
-for the larger model preset), check availability for that card first and
+for the two 70B+ presets), check availability for that card first and
 pick the datacenter accordingly, rather than picking one at random and
 discovering the GPU you want isn't offered there.
 
@@ -130,31 +106,37 @@ intelligence-sharing, regardless of RunPod's own policies. EU datacenters
 the strongest option in RunPod's list - EEA/GDPR-aligned, non-Five-Eyes,
 and has decent GPU stock (RTX 4090/5090, RTX PRO 6000, occasional H100/
 H200 SXM). If you're in North America, Iceland is still low enough
-latency for interactive SSH/coding-agent use.
+latency for interactive use.
 
-### GPU tier and volume size, for this repo's two presets
+### GPU tier and volume size, per model preset
 
-Sizing based on the dense Qwen3.6-27B and Qwen3-Coder-Next (MoE, ~30B
-total/~3B active) presets this repo ships:
+Weight sizes are approximate (AWQ/FP8 param count x ~4-8 bits +
+overhead); see `lib/launch.sh`'s `PRESET_TABLE` for the exact HF repos.
 
-| Precision | Weights (approx, either preset) | GPU tier that fits | Volume size |
+| Preset | Approx. weights | Min GPU (VRAM) | Suggested volume |
 |---|---|---|---|
-| 4-bit (GGUF Q4, default) | ~17-20GB | 24GB card (RTX 4090) | 60GB |
-| 8-bit | ~31-33GB | 32-48GB card | 100GB |
-| fp16 | ~61-65GB | 80GB+ card (RTX PRO 6000, H100/H200) | 100GB |
-| Both presets kept side by side, or fp16 + a quantized copy | - | - | 150-200GB |
+| `deepseek-r1-distill-32b` | ~19GB | 24GB (RTX 4090) | 60GB |
+| `qwen3-32b` | ~19GB | 24GB (RTX 4090) | 60GB |
+| `qwen3-coder-30b-moe` | ~17GB | 24GB (RTX 4090) | 60GB |
+| `qwen2.5-72b` | ~41GB | 48GB (A6000/L40S) | 100GB |
+| `llama3.3-70b` | ~39GB | 48GB (A6000/L40S) | 100GB |
+| Several presets cached side by side | - | - | 150-200GB |
+| `custom` (any HF repo) | depends on the model | you decide | the launch wizard prompts to grow the volume if needed (RunPod only allows growing, never shrinking, and it's a billed, permanent change) |
 
-`CONTAINER_DISK_GB` in `lib/launch.sh` (currently 25GB) is separate from
-the volume and only needs to hold the OS, `llama.cpp`, and all three
-frontends (OpenHands, llama.cpp's built-in UI, Open WebUI - only one runs
-per pod, but the image ships all three so you can switch on the next
-launch without a rebuild) - model weights always live on the network
-volume, not the container disk. Not yet measured against a real build;
-bump this if the image ends up bigger than 25GB.
-A first-time model download can briefly need close to 2x the weight size
-(source cache + destination copy) unless you download directly to the
-volume path without an intermediate cache, so don't size the volume down
-to the bare minimum.
+The min-GPU column is a hard floor the wizard filters `runpodctl gpu
+list` against - it's not a comfort recommendation. A 24GB card running
+a ~19GB-weight preset has only a few GB left for KV cache, which limits
+how much context you can actually request; a bigger card in the same
+tier buys more context headroom. The context-length prompt during
+launch defaults to a conservative value per preset for exactly this
+reason - bump it if you picked a bigger card than the floor.
+
+`CONTAINER_DISK_GB` in `lib/launch.sh` (currently 40GB) is separate
+from the network volume and only needs to hold the OS and the
+`vllm/vllm-openai` image's own CUDA/PyTorch/vLLM stack - model weights
+always live on the network volume (`HF_HOME`), not the container disk.
+Not yet measured against a real pull; bump it if the image ends up
+bigger than 40GB.
 
 Once everything above exists, run `./startup.sh`. It detects there's no
 local config yet and walks you through the rest.
