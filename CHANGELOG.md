@@ -2,6 +2,25 @@
 
 ## Change history
 
+### Unreleased
+
+## [0.10.0] - 2026-08-13
+
+### Added
+- Added `--storage-mode container-disk` as an alternative to the default `network-volume` mode, using a larger local per-pod disk instead of a persistent volume - faster with no network-mount overhead, but nothing survives pod deletion so every fresh launch re-downloads the model; `e2e-test.sh --storage-mode` times both modes for direct comparison.
+- Added `--no-logging` (`DISABLE_LOGGING=1`) to disable vLLM's request-stats/access logging and cloudflared's connection log on the pod.
+- Added `--debug`, tracing script execution to the terminal and a timestamped log file under `~/.runpod-lab/logs`, with known secret values (API keys, tokens, auth headers) redacted before they reach either destination.
+- Added `--debug-quiet`, writing the same trace to the log file only via a dedicated file descriptor, keeping the console free of trace noise during interactive `--setup` runs.
+- Extended `--rotate` to optionally regenerate the dedicated SSH keypair, registering the new public key with RunPod and removing the old one by fingerprint.
+
+### Changed
+- Moved `RUNPOD_API_KEY`, `VLLM_API_KEY`, and `CLOUDFLARE_TUNNEL_TOKEN` out of the plaintext config file and into the OS keyring (`secret-tool`/libsecret), with automatic one-time migration of any existing plaintext config.
+
+### Fixed
+- Fixed `runpodctl` calls having no timeout, causing indefinite hangs on a stuck API request; all call sites now route through a 20-second timeout wrapper.
+- Fixed `run_step_sequence()` silently aborting the wizard after its first step, caused by a post-increment loop-counter bug interacting badly with `set -e`.
+- Fixed `prompt_text()` crashing with an unbound-variable error when a caller's own result variable happened to share the function's internal variable name (`reply`).
+
 ### 0.9.0 - vLLM pivot released, non-interactive SSH, an e2e smoke test, and a sixth (FP8) preset
 
 1. First release of the architecture pivot away from the custom llama.cpp + OpenHands pod image (committed earlier but never tagged): pods now run vLLM's own official `vllm/vllm-openai` image, serving an OpenAI-compatible endpoint directly instead of routing through a chosen frontend (OpenHands / llama.cpp's built-in UI / Open WebUI, all removed, along with the shared port-3000 setup they needed). The GitHub App / git-identity / safety-commit machinery is gone entirely - `onstart.sh`, `safety-commit.sh`, and the wizard's GitHub App, git-identity, and `gh`-install steps are all removed, so nothing on the pod edits or commits code anymore and no GitHub credential of any kind reaches the pod or its stored config. `image/presets.conf`'s GGUF/llama-server preset format was replaced by `PRESET_TABLE` in `lib/launch.sh`. `idle-watchdog.sh` now detects activity by polling vLLM's own `/metrics` endpoint (`vllm:request_success_total`, `vllm:num_requests_running`) instead of counting active SSH sessions, since normal use now hits the API directly and often opens no SSH session at all. The Cloudflare Access policy now covers only the SSH hostname; the API hostname is deliberately left out of Access and gated by vLLM's own `--api-key` bearer token instead, since most OpenAI-compatible client tools can send a bearer token but can't add Access's custom headers. `CONTAINER_DISK_GB` raised from 25GB to 40GB for the heavier vLLM base image (full CUDA/PyTorch/vLLM stack); model weights now live under `HF_HOME` on the network volume, so a second launch of the same preset skips re-downloading.
