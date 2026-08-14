@@ -4,6 +4,26 @@
 
 ### Unreleased
 
+## [1.0.0] - 2026-08-13
+
+### Added
+- Ephemeral, per-launch SSH keypair (`setup_ephemeral_ssh_key()` / `cleanup_ephemeral_ssh_key()` in `lib/common.sh`): generated fresh for every pod, registered with RunPod via `runpodctl ssh add-key`, and revoked again on teardown, replacing the old single long-lived dedicated keypair.
+- `resolve_pod_ssh_endpoint()` (`lib/common.sh`) to look up a pod's direct public SSH IP/port via `runpodctl ssh info`, used by `wait_for_pod_ready()`, `e2e-test.sh`, and the final launch summary.
+- SSH IP-pinning on the pod image: `lock_ssh_to_first_client()` in `image/entrypoint.sh` locks port 22 to whichever IP connects first, best-effort and not yet confirmed against RunPod's proxy behavior.
+- One-off vLLM API key generated per launch in `create_pod()` (`lib/launch.sh`) and printed once in the launch summary, instead of being generated once at setup and stored.
+- `--gpu-id` flag on `e2e-test.sh` to manually pick a GPU instead of always auto-selecting the cheapest one meeting the VRAM floor.
+
+### Changed
+- Pods are now reached directly through RunPod's own per-pod SSH (`22/tcp`) and HTTP proxy (`https://<pod-id>-8000.proxy.runpod.net`) instead of a Cloudflare Tunnel with a stable custom hostname.
+- Setup wizard (`lib/wizard.sh`) cut from 8 steps to 4: dropped the dedicated-SSH-key, vLLM-API-key, Cloudflare Tunnel, and local `~/.ssh/config` steps, since those are now either automatic per launch or unnecessary.
+- `load_secrets()` (`lib/common.sh`) now clears out any leftover `VLLM_API_KEY`/`CLOUDFLARE_TUNNEL_TOKEN` keyring entries and related config-file lines from a pre-pivot install on the next run, alongside its existing `RUNPOD_API_KEY` plaintext-to-keyring migration.
+- `README.md` and `PREREQUISITES.md` rewritten to describe the RunPod-only setup and endpoint access flow.
+
+### Removed
+- Cloudflare Tunnel integration end to end: `cloudflared` install/download (`lib/wizard.sh`, `image/Dockerfile`), the tunnel-token validation and extraction functions, the Cloudflare Tunnel wizard step, and the tunnel process/log handling in `image/entrypoint.sh`.
+- Persistent dedicated SSH keypair setup and the managed `Host runpod-lab` block it used to write to `~/.ssh/config`.
+- `CLOUDFLARE_TUNNEL_TOKEN`, `CLOUDFLARE_SSH_HOSTNAME`, and `CLOUDFLARE_API_HOSTNAME` from the config file, keyring, and pod `--env` payload.
+
 ## [0.10.0] - 2026-08-13
 
 ### Added
