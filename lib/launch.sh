@@ -413,15 +413,26 @@ create_pod() {
   # itself has crashed or its request-activity detection is misbehaving.
   terminate_after="$(date -u -d "+${MAX_RUNTIME_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)"
 
+  # One-off keypair (registered with RunPod, baked into this pod's
+  # authorized_keys at boot) and one-off vLLM bearer token, both generated
+  # fresh right here instead of reused from setup - see
+  # setup_ephemeral_ssh_key() in lib/common.sh. Must run before the
+  # `pod create` call below: RunPod only bakes keys that are ALREADY
+  # registered to the account into a new pod's authorized_keys at boot.
+  setup_ephemeral_ssh_key
+  VLLM_API_KEY="$(openssl rand -hex 32)"
+
   log_info ""
   log_info "Creating pod (GPU $GPU_ID, model $MODEL_REPO, auto-terminate at $terminate_after UTC)..."
 
-  # --env deliberately carries ONLY these nine names - no GitHub credential,
-  # no git identity: this pod only serves inference, nothing on it edits or
-  # commits code anymore.
+  # --env deliberately carries ONLY these seven names - no GitHub
+  # credential, no git identity, no Cloudflare token: this pod only serves
+  # inference, reached directly over its own 22/tcp and RunPod's own HTTP
+  # proxy (see wait_for_pod_ready()/run_normal_launch() below), nothing on
+  # it edits or commits code anymore.
   local env_json
-  env_json=$(printf '{"CLOUDFLARE_TUNNEL_TOKEN":"%s","MODEL_REPO":"%s","SERVED_MODEL_NAME":"%s","MAX_MODEL_LEN":"%s","QUANTIZATION":"%s","VLLM_API_KEY":"%s","IDLE_MINUTES":"%s","RUNPOD_API_KEY":"%s","DISABLE_LOGGING":"%s"}' \
-    "$CLOUDFLARE_TUNNEL_TOKEN" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$MAX_MODEL_LEN" "${MODEL_QUANTIZATION:-auto}" "$VLLM_API_KEY" "$IDLE_MINUTES" "$RUNPOD_API_KEY" "${NUKE_LOGGING:-0}")
+  env_json=$(printf '{"MODEL_REPO":"%s","SERVED_MODEL_NAME":"%s","MAX_MODEL_LEN":"%s","QUANTIZATION":"%s","VLLM_API_KEY":"%s","IDLE_MINUTES":"%s","RUNPOD_API_KEY":"%s","DISABLE_LOGGING":"%s"}' \
+    "$MODEL_REPO" "$SERVED_MODEL_NAME" "$MAX_MODEL_LEN" "${MODEL_QUANTIZATION:-auto}" "$VLLM_API_KEY" "$IDLE_MINUTES" "$RUNPOD_API_KEY" "${NUKE_LOGGING:-0}")
 
   # STORAGE_MODE=container-disk omits --network-volume-id/--volume-mount-path
   # entirely - with nothing mounted at /workspace/persistent, entrypoint.sh's
@@ -450,11 +461,18 @@ create_pod() {
     --env "$env_json")" || die "Pod creation failed. Raw output:\n$create_output"
 
   # Picking specific fields (rather than printing $create_output raw) is
-  # deliberate: the response's "env" array echoes back RUNPOD_API_KEY,
-  # CLOUDFLARE_TUNNEL_TOKEN, and VLLM_API_KEY in plaintext, which has no
-  # business hitting the terminal or a captured log.
+  # deliberate: the response's "env" array echoes back RUNPOD_API_KEY and
+  # VLLM_API_KEY in plaintext, which has no business hitting the terminal
+  # or a captured log.
   POD_ID="$(jq -r '.id // empty' <<< "$create_output")"
   [[ -n "$POD_ID" ]] || die "Pod created but no id found in the response: $create_output"
+
+  # RunPod auto-exposes any HTTP port a pod's process listens on at this
+  # URL, no config needed (confirmed live 2026-08-14: curling
+  # https://<pod-id>-8000.proxy.runpod.net/v1/models against a plain
+  # vllm-openai pod worked immediately, 401 without the bearer token, 200
+  # with it) - this is what used to need a whole Cloudflare Tunnel setup.
+  API_HOSTNAME="$POD_ID-8000.proxy.runpod.net"
 
   log_ok "Pod created:"
   jq -r '"  ID:     \(.id)\n  Name:   \(.name)\n  GPU:    \(.machine.gpuDisplayName) x\(.gpuCount)\n  Cost:   $\(.costPerHr)/hr\n  Status: \(.desiredStatus)"' <<< "$create_output"
@@ -475,26 +493,32 @@ wait_for_pod_ready() {
   (( waited < max_wait )) || die "Pod didn't report running within ${max_wait}s. Check the console."
   log_ok "Pod reports running."
 
-  # Pod status alone doesn't mean sshd + cloudflared are up yet inside it -
-  # actually reaching it over SSH (through the tunnel alias from step 8) is
-  # the real readiness signal, not just the API's status field.
-  log_info "Waiting for SSH to come up through the tunnel..."
+  # Pod status alone doesn't mean sshd is up yet inside it - actually
+  # reaching it over its own direct 22/tcp (resolve_pod_ssh_endpoint(),
+  # lib/common.sh) is the real readiness signal, not just the API's status
+  # field. Also sets SSH_HOST/SSH_PORT for anything later that needs to ssh
+  # in (diagnostics, the final launch summary).
+  log_info "Resolving the pod's direct SSH endpoint..."
+  resolve_pod_ssh_endpoint || die "Pod is running but never got a direct SSH endpoint - check the console."
+
+  log_info "Waiting for SSH to come up..."
   waited=0
   while (( waited < max_wait )); do
-    if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new runpod-lab true 2>/dev/null; then
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+         -i "$SSH_KEY_PATH" -p "$SSH_PORT" "root@$SSH_HOST" true 2>/dev/null; then
       log_ok "SSH reachable."
       return
     fi
     sleep 10; waited=$((waited + 10))
   done
-  die "SSH never came up through the tunnel within ${max_wait}s. Pod is running but entrypoint.sh/cloudflared may have failed - check the console."
+  die "SSH never came up within ${max_wait}s. Pod is running but entrypoint.sh may have failed - check the console."
 }
 
 # SSH being up only means entrypoint.sh started - it says nothing about
 # whether vLLM has finished loading a (potentially tens-of-GB) model into
-# VRAM yet. Poll the actual public endpoint (through the tunnel, the same
-# path a real client uses) so "Pod ready" means the API genuinely works,
-# not just that the container booted.
+# VRAM yet. Poll the actual public endpoint (RunPod's own per-pod proxy
+# URL, the same path a real client uses) so "Pod ready" means the API
+# genuinely works, not just that the container booted.
 wait_for_vllm_ready() {
   log_info ""
   log_info "Waiting for the vLLM endpoint to finish loading $MODEL_REPO (this can take several minutes for a large model)..."
@@ -502,13 +526,13 @@ wait_for_vllm_ready() {
   while (( waited < max_wait )); do
     if curl -fsS --max-time 5 -o /dev/null \
          -H "Authorization: Bearer $VLLM_API_KEY" \
-         "https://$CLOUDFLARE_API_HOSTNAME/v1/models"; then
+         "https://$API_HOSTNAME/v1/models"; then
       log_ok "vLLM endpoint is serving."
       return
     fi
     sleep 15; waited=$((waited + 15))
   done
-  log_warn "vLLM endpoint didn't respond within ${max_wait}s - it may still be loading, or something failed. Check 'ssh runpod-lab' and look at the container's own stdout (RunPod console > pod > Logs), since this script doesn't have a way to tail that remotely."
+  log_warn "vLLM endpoint didn't respond within ${max_wait}s - it may still be loading, or something failed. Check 'ssh -i $SSH_KEY_PATH -p $SSH_PORT root@$SSH_HOST' and look at the container's own stdout (RunPod console > pod > Logs), since this script doesn't have a way to tail that remotely."
 }
 
 # --- entry point -------------------------------------------------------------
@@ -536,9 +560,10 @@ run_normal_launch() {
 
   log_info ""
   log_ok "Pod ready."
-  log_info "OpenAI-compatible endpoint: https://$CLOUDFLARE_API_HOSTNAME/v1"
+  log_info "OpenAI-compatible endpoint: https://$API_HOSTNAME/v1"
   log_info "Model name for clients: $SERVED_MODEL_NAME"
-  log_info "API key: see $CONFIG_FILE (VLLM_API_KEY) if you don't have it handy."
-  log_info "Diagnostics: ssh runpod-lab"
+  log_info "API key (Authorization: Bearer <key> - one-off, generated for this pod, shown once, not stored anywhere): $VLLM_API_KEY"
+  log_info "Diagnostics: ssh -i $SSH_KEY_PATH -p $SSH_PORT root@$SSH_HOST"
+  log_info "  (that SSH key is registered with your RunPod account for this pod only - it stops being useful once the pod is stopped/deleted, and 'runpodctl ssh remove-key --fingerprint $SSH_KEY_FINGERPRINT' revokes it from your account sooner if you want that.)"
   log_info "Pod ID: $POD_ID   Model: $MODEL_REPO   Quantization: ${MODEL_QUANTIZATION:-auto}   Context: $MAX_MODEL_LEN   Idle limit: ${IDLE_MINUTES}m   Max runtime: ${MAX_RUNTIME_HOURS}h"
 }

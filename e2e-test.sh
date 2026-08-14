@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # e2e-test.sh - runs on your own machine, same as startup.sh. Boots a real,
-# billed GPU pod end to end and checks it actually works: reachable over
-# SSH, serving real completions through the Cloudflare-tunneled OpenAI
-# endpoint, and (optionally) that idle-watchdog.sh really shuts it down.
-# Always tears the pod down afterward (pass or fail), same as
-# maybe_run_prewarm()'s CPU-pod cleanup in lib/launch.sh.
+# billed GPU pod end to end and checks it actually works: reachable directly
+# over SSH (the pod's own 22/tcp, via resolve_pod_ssh_endpoint() in
+# lib/common.sh - no Cloudflare involved), serving real completions through
+# RunPod's own per-pod proxy URL, and (optionally) that idle-watchdog.sh
+# really shuts it down. Always tears the pod down afterward (pass or fail),
+# same as maybe_run_prewarm()'s CPU-pod cleanup in lib/launch.sh.
 #
 # Exists because every previous attempt at this (see handoff.md) was manual
-# and ad hoc, and got derailed by `ssh runpod-lab` needing a passphrase typed
-# in - fine at a keyboard, fatal for a script. setup_ssh_key() in
-# lib/wizard.sh now generates a dedicated, passphrase-free keypair
+# and ad hoc, and got derailed by SSH needing a passphrase typed in - fine
+# at a keyboard, fatal for a script. setup_ephemeral_ssh_key() in
+# lib/common.sh generates a fresh, passphrase-free keypair per launch
 # specifically so this script (and anything else non-interactive) can run
 # unattended.
 #
@@ -34,6 +35,7 @@ SKIP_SSH_CHECK=0
 STORAGE_MODE="network-volume"
 NUKE_LOGGING=0
 DEBUG=0
+GPU_ID_OVERRIDE=""
 
 usage() {
   cat <<EOF
@@ -51,15 +53,20 @@ Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--idle-minutes N] [-
                             Adds roughly --idle-minutes to the run. Ignored with --keep.
   --idle-minutes N          Idle window for this run (default 3 - short on purpose,
                             this is a throwaway test pod, not a real session).
-  --skip-ssh-check          Skip the SSH-reachability and on-pod process checks. Only
-                            the HTTP endpoint gets exercised. Use if the dedicated key
-                            from setup_ssh_key() hasn't been set up yet.
+  --skip-ssh-check          Skip the extra on-pod process check (sshd/idle-watchdog/
+                            vllm all running, checked over one SSH round trip). SSH
+                            itself is still required for the pod to be considered
+                            ready at all - see wait_for_pod_ready() in lib/launch.sh.
   --storage-mode MODE       "network-volume" (default) or "container-disk" - see
                             lib/launch.sh. Run this script once with each value (same
                             --preset) to A/B compare: this script prints the wall-clock
                             time from pod-create to vLLM-ready either way, which is the
                             main cost/speed axis that differs between the two modes.
   --no-logging              Passes DISABLE_LOGGING=1 to the pod - see image/entrypoint.sh.
+  --gpu-id ID               Skip the "cheapest available" auto-pick and use this exact
+                             GPU id (as printed by 'runpodctl gpu list', e.g. the
+                             quoted display name). Use when the cheapest GPU meeting
+                             the preset's VRAM floor is temporarily out of capacity.
   --debug                   Trace every command (set -x) to both the terminal and a
                             timestamped log file under ~/.runpod-lab/logs. Known secrets
                             are best-effort redacted - NOT guaranteed - skim before
@@ -79,6 +86,7 @@ while (( $# > 0 )); do
     --skip-ssh-check) SKIP_SSH_CHECK=1 ;;
     --storage-mode) STORAGE_MODE="$2"; shift ;;
     --no-logging) NUKE_LOGGING=1 ;;
+    --gpu-id) GPU_ID_OVERRIDE="$2"; shift ;;
     --debug) DEBUG=1; DEBUG_MODE="both" ;;
     --debug-quiet) DEBUG=1; DEBUG_MODE="disk" ;;
     -h|--help) usage; exit 0 ;;
@@ -100,7 +108,6 @@ export RUNPOD_API_KEY
 
 log_info "e2e-test.sh starting (build $RUNPOD_LAB_BUILD)."
 validate_runpod_api_key
-validate_cloudflare_tunnel_token
 
 # --- resolve preset (non-interactively - no menus here) ---------------------
 
@@ -139,8 +146,15 @@ log_info "Preset: $PRESET_NAME ($MODEL_REPO, quantization=$MODEL_QUANTIZATION, m
 log_info "Fetching live GPU availability for datacenter $DATACENTER_ID..."
 gpu_rows="$(list_available_gpus "$TEST_MIN_VRAM")" \
   || die "No GPUs meeting the ${TEST_MIN_VRAM}GB+ VRAM requirement are currently available in datacenter $DATACENTER_ID."
-IFS=$'\t' read -r GPU_ID gpu_name gpu_vram gpu_price _stock <<< "$(head -n1 <<< "$gpu_rows")"
-log_info "GPU: $gpu_name (${gpu_vram}GB, \$${gpu_price}/hr) - cheapest available meeting the floor."
+if [[ -n "$GPU_ID_OVERRIDE" ]]; then
+  gpu_row="$(grep -F -m1 "$GPU_ID_OVERRIDE"$'\t' <<< "$gpu_rows")" \
+    || die "--gpu-id '$GPU_ID_OVERRIDE' isn't in the list of GPUs currently meeting the ${TEST_MIN_VRAM}GB+ floor in $DATACENTER_ID. Run 'runpodctl gpu list' to check the exact id."
+  IFS=$'\t' read -r GPU_ID gpu_name gpu_vram gpu_price _stock <<< "$gpu_row"
+  log_info "GPU: $gpu_name (${gpu_vram}GB, \$${gpu_price}/hr) - manually selected via --gpu-id."
+else
+  IFS=$'\t' read -r GPU_ID gpu_name gpu_vram gpu_price _stock <<< "$(head -n1 <<< "$gpu_rows")"
+  log_info "GPU: $gpu_name (${gpu_vram}GB, \$${gpu_price}/hr) - cheapest available meeting the floor."
+fi
 
 # --- launch -------------------------------------------------------------
 
@@ -165,8 +179,9 @@ cleanup() {
     runpodctl_t pod stop "$POD_ID" >/dev/null 2>&1 || true
     runpodctl_t pod delete "$POD_ID" >/dev/null 2>&1 || true
     log_ok "Pod $POD_ID stopped/deleted."
+    cleanup_ephemeral_ssh_key
   elif [[ "$POD_CREATED" == 1 ]]; then
-    log_warn "--keep passed: pod $POD_ID left running. You are responsible for 'runpodctl pod stop/delete $POD_ID' when done - it is billing right now."
+    log_warn "--keep passed: pod $POD_ID left running. You are responsible for 'runpodctl pod stop/delete $POD_ID' when done - it is billing right now. The SSH key ($SSH_KEY_FINGERPRINT) is left registered too; remove it yourself later with 'runpodctl ssh remove-key --fingerprint $SSH_KEY_FINGERPRINT'."
   fi
 }
 trap cleanup EXIT
@@ -203,24 +218,26 @@ check() {
 
 check_models_endpoint() {
   curl -fsS --max-time 10 -H "Authorization: Bearer $VLLM_API_KEY" \
-    "https://$CLOUDFLARE_API_HOSTNAME/v1/models" | grep -qF "\"$SERVED_MODEL_NAME\""
+    "https://$API_HOSTNAME/v1/models" | grep -qF "\"$SERVED_MODEL_NAME\""
 }
 
 check_chat_completion() {
   local resp
   resp="$(curl -fsS --max-time 60 -H "Authorization: Bearer $VLLM_API_KEY" -H "Content-Type: application/json" \
     -d "$(printf '{"model":"%s","messages":[{"role":"user","content":"Reply with exactly one word: OK"}],"max_tokens":16}' "$SERVED_MODEL_NAME")" \
-    "https://$CLOUDFLARE_API_HOSTNAME/v1/chat/completions")" || return 1
+    "https://$API_HOSTNAME/v1/chat/completions")" || return 1
   [[ -n "$(jq -r '.choices[0].message.content // empty' <<< "$resp")" ]]
 }
 
 check_ssh_processes() {
-  # sshd/cloudflared/idle-watchdog/vllm all confirmed up via one round trip,
-  # rather than four separate ssh calls each paying the connection cost.
-  ssh -o ConnectTimeout=10 -o BatchMode=yes runpod-lab '
+  # sshd/idle-watchdog/vllm all confirmed up via one round trip, rather
+  # than three separate ssh calls each paying the connection cost. Direct
+  # pod IP:port, resolved by wait_for_pod_ready() (lib/launch.sh) already -
+  # no Cloudflare anywhere in this repo anymore (see CHANGELOG.md).
+  ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+    -i "$SSH_KEY_PATH" -p "$SSH_PORT" "root@$SSH_HOST" '
     set -e
     pgrep -x sshd >/dev/null
-    pgrep -f "cloudflared tunnel run" >/dev/null
     pgrep -f "idle-watchdog.sh" >/dev/null
     pgrep -f "vllm serve" >/dev/null
   '
@@ -231,7 +248,7 @@ log_info "Running checks..."
 check "GET /v1/models lists $SERVED_MODEL_NAME" check_models_endpoint
 check "POST /v1/chat/completions returns a real completion" check_chat_completion
 if [[ "$SKIP_SSH_CHECK" != 1 ]]; then
-  check "SSH reachable, sshd/cloudflared/idle-watchdog/vllm all running" check_ssh_processes
+  check "SSH reachable, sshd/idle-watchdog/vllm all running" check_ssh_processes
 else
   log_warn "SKIP: SSH/process checks (--skip-ssh-check passed)."
 fi

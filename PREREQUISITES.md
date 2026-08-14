@@ -1,11 +1,12 @@
 # Prerequisites
 
 Everything below needs to exist before you run `startup.sh` for the
-first time. The setup wizard in `startup.sh` handles almost everything
-else - installing local tools, creating the network volume, generating
-the vLLM API key, walking you through the Cloudflare steps - so this
-list is only what has to happen on each service's own website before
-the wizard can take over.
+first time. The setup wizard in `startup.sh` handles everything else -
+installing local tools, creating the network volume - so this list is
+only what has to happen on RunPod's own website before the wizard can
+take over. There's no third-party tunnel service in the picture at all
+(see CHANGELOG.md for why Cloudflare was dropped): RunPod exposes both
+SSH (`22/tcp`) and the vLLM HTTP endpoint directly, per pod.
 
 ## RunPod
 
@@ -15,66 +16,9 @@ the wizard can take over.
    auto-pay / low-balance alerts needs a card on file anyway.
 3. Generate an API key (Settings > API Keys). Keep it somewhere you can
    paste from - the wizard asks for it on first run and uses it for
-   everything after that.
-4. Nothing to prepare here - the wizard generates its own dedicated
-   keypair (`~/.runpod-lab/ssh_key`, no passphrase) the first time it
-   runs and registers the public half with your RunPod account. It's
-   deliberately not your personal/default SSH identity: RunPod pods are
-   reached over SSH for diagnostics only (normal use is the OpenAI
-   endpoint, not an interactive session), the pods themselves are
-   ephemeral (auto-terminate when idle), and a passphrase-free key is
-   what lets `ssh runpod-lab` run non-interactively (e2e test scripts,
-   an agent session, etc.) instead of hanging on a prompt nothing can
-   answer.
-
-## Cloudflare
-
-1. Have, or create, a Cloudflare account. The free plan is sufficient.
-2. Have a domain added to that account. The Tunnel needs a hostname to
-   publish under (e.g. `pod.yourdomain.com`). This is the one item on
-   this list that genuinely can't be deferred to the wizard - without a
-   domain in Cloudflare, there's nothing for a named Tunnel to attach
-   to.
-3. Nothing else ahead of time. The wizard pauses with the exact console
-   steps for creating the named Tunnel and adding two Public Hostname
-   routes on it: one for SSH -> `localhost:22`, one for the OpenAI-
-   compatible API -> `localhost:8000` (fixed - that's vLLM's own
-   documented default port, not something you choose per launch the way
-   the old frontend port was).
-
-   In brief, what that involves: Networking > Tunnels > Create a tunnel
-   (Cloudflared connector, named, not the quick/trycloudflare kind) ->
-   copy the tunnel token from the install command shown (or later from
-   the tunnel's Overview page) -> add the two Public Hostname routes
-   described above under the tunnel's "Public Hostname" tab -> then,
-   under Zero Trust > Access > Applications, add an application, stay
-   on the "Self-hosted and private" tab of the type-picker modal (the
-   Private destinations/Workers/Public DNS/Service auth sub-tabs there
-   are just examples, not choices you need to make) and click "Continue
-   with Self-hosted and private" -> on the Destinations section, add
-   **only the SSH subdomain** as a public hostname -> add a policy that
-   allows only your own email -> save.
-
-   The API hostname is deliberately left OUT of that Access
-   application. It's gated by vLLM's own `--api-key` bearer-token auth
-   instead (the wizard generates this for you), because most OpenAI-
-   compatible client tools (the `openai` SDK, Continue, Aider, and
-   similar) can send a bearer token but have no way to add Access's
-   custom `CF-Access-Client-Id`/`Secret` headers - putting it behind
-   Access would make the endpoint unusable from them rather than just
-   gating it. This is a real tradeoff, not a default to blindly accept:
-   the API hostname is reachable by anyone who finds it **and** has the
-   API key, not locked to your own identity the way SSH is. If that's
-   not acceptable for your threat model, add a second Access
-   application covering the API hostname too, and expect to lose
-   compatibility with client tools that can't set custom headers.
-
-   Direct links, once you know your account ID and tunnel ID (both
-   appear in the address bar once you're on the relevant page - swap
-   them into the placeholders below to jump straight there next time
-   instead of digging through the dashboard nav):
-     - Tunnel overview (token, routes): `https://dash.cloudflare.com/<account-id>/tunnels/<tunnel-id>/overview`
-     - Access policies: `https://dash.cloudflare.com/<account-id>/one/access-controls/policies`
+   everything after that. This is the only credential you need to
+   provide; everything else (the SSH keypair, the vLLM API key) is
+   generated automatically per pod launch.
 
 ## Local machine
 
@@ -83,24 +27,21 @@ the wizard can take over.
 2. `~/.local/bin` on your `PATH`. Default on Fedora-family systems
    including Bazzite; check with `echo $PATH` if unsure. The wizard
    installs its tools there.
-3. `runpodctl` and `cloudflared` are installed by the wizard as
-   user-level binaries (downloaded release binaries into
-   `~/.local/bin`). No `sudo`, no package manager, no reboot.
-   `cloudflared` is only needed locally to validate the tunnel token
-   during setup - the pod itself runs its own `cloudflared`, not this
-   one.
+3. `runpodctl` is installed by the wizard as a user-level binary
+   (downloaded release binary into `~/.local/bin`). No `sudo`, no
+   package manager, no reboot.
 4. `secret-tool` (package `libsecret-tools` on Debian/Ubuntu,
    `libsecret` on Fedora/Arch) NOT auto-installed by the wizard (it's a
    system package, not a standalone release binary) - the wizard dies
-   with the exact package name if it's missing. RUNPOD_API_KEY,
-   VLLM_API_KEY, and CLOUDFLARE_TUNNEL_TOKEN are stored in the OS
-   keyring via this tool instead of a plaintext file, which needs a
-   running, unlocked Secret Service (GNOME Keyring or KWallet) in your
-   session - true by default on a normal desktop login, not available
-   in a headless shell or a container with no D-Bus session bus. If
-   you're running these scripts from inside a container (e.g. a
-   Distrobox/Toolbox dev environment), run them from the host session
-   or a shell that has your desktop's D-Bus/keyring reachable instead.
+   with the exact package name if it's missing. RUNPOD_API_KEY is
+   stored in the OS keyring via this tool instead of a plaintext file,
+   which needs a running, unlocked Secret Service (GNOME Keyring or
+   KWallet) in your session - true by default on a normal desktop
+   login, not available in a headless shell or a container with no
+   D-Bus session bus. If you're running these scripts from inside a
+   container (e.g. a Distrobox/Toolbox dev environment), run them from
+   the host session or a shell that has your desktop's D-Bus/keyring
+   reachable instead.
 
 ## One thing to decide before you start
 

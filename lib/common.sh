@@ -52,17 +52,16 @@ require_cmd() {
 # the first time this feature existed at all (before this redaction filter
 # was added in response). $REDACT_SED below is a BEST-EFFORT mitigation, NOT
 # a guarantee: it masks known secret variable names, the JSON forms they
-# take in create_pod()'s --env payload, Authorization headers, and RunPod's/
-# Cloudflare's own distinctive token prefixes (rpa_, eyJhIjoi) - but a raw
-# `set -x` trace can always leak a secret through some code path this filter
-# doesn't anticipate. Treat any --debug log, and any --debug terminal output
-# you paste elsewhere, as sensitive regardless - skim it before sharing it.
+# take in create_pod()'s --env payload, Authorization headers, and RunPod's
+# own distinctive token prefix (rpa_) - but a raw `set -x` trace can always
+# leak a secret through some code path this filter doesn't anticipate.
+# Treat any --debug log, and any --debug terminal output you paste
+# elsewhere, as sensitive regardless - skim it before sharing it.
 REDACT_SED='
-  s/(RUNPOD_API_KEY|VLLM_API_KEY|CLOUDFLARE_TUNNEL_TOKEN)=[^ '"'"']*/\1=***REDACTED***/g
-  s/"(RUNPOD_API_KEY|VLLM_API_KEY|CLOUDFLARE_TUNNEL_TOKEN)":"[^"]*"/"\1":"***REDACTED***"/g
+  s/(RUNPOD_API_KEY|VLLM_API_KEY)=[^ '"'"']*/\1=***REDACTED***/g
+  s/"(RUNPOD_API_KEY|VLLM_API_KEY)":"[^"]*"/"\1":"***REDACTED***"/g
   s/(Authorization:? ?Bearer) [A-Za-z0-9._-]+/\1 ***REDACTED***/g
   s/rpa_[A-Za-z0-9]+/***REDACTED-RUNPOD-KEY***/g
-  s/eyJhIjoi[A-Za-z0-9_+\/=-]+/***REDACTED-CF-TOKEN***/g
 '
 
 enable_debug_logging() {
@@ -114,6 +113,74 @@ runpodctl_t() {
   timeout "$RUNPODCTL_TIMEOUT_SECS" runpodctl "$@"
 }
 
+# --- ephemeral per-launch SSH key -------------------------------------------
+# Generated fresh for every pod launch and registered with RunPod via
+# `runpodctl ssh add-key` - no long-lived keypair sitting in the account
+# forever the way the old setup_ssh_key() (one keypair, generated once by
+# the wizard, reused by every future launch) did. Must run BEFORE
+# create_pod(): RunPod bakes every currently-registered account key into a
+# new pod's authorized_keys at boot (via its own PUBLIC_KEY env, confirmed
+# live 2026-08-14 - a pod's `env.PUBLIC_KEY` lists every key on the
+# account), so the key has to exist in the account first for a new pod to
+# pick it up.
+setup_ephemeral_ssh_key() {
+  local key_dir
+  key_dir="$(mktemp -d "${TMPDIR:-/tmp}/runpod-lab-ssh.XXXXXX")" || die "Could not create a temp dir for the ephemeral SSH key."
+  SSH_KEY_PATH="$key_dir/id_ed25519"
+  ssh-keygen -t ed25519 -N "" -C "runpod-lab-ephemeral-$(date +%s)" -f "$SSH_KEY_PATH" >/dev/null \
+    || die "ssh-keygen failed to generate the ephemeral SSH keypair."
+  chmod 600 "$SSH_KEY_PATH"
+  runpodctl_t ssh add-key --key-file "$SSH_KEY_PATH.pub" \
+    || die "Failed to register the ephemeral SSH key with your RunPod account (or timed out after ${RUNPODCTL_TIMEOUT_SECS}s)."
+  SSH_KEY_FINGERPRINT="$(ssh-keygen -lf "$SSH_KEY_PATH.pub" | awk '{print $2}')"
+  log_ok "Generated and registered a one-off SSH key for this pod ($SSH_KEY_FINGERPRINT)."
+}
+
+# Reverses setup_ephemeral_ssh_key(): removes the key from the RunPod
+# account and deletes the local copy. Best-effort on the remote removal
+# (`|| true` via log_warn, not die) - a leftover key in the account is a
+# minor cleanup issue, not worth taking a teardown script down over, same
+# reasoning as e2e-test.sh's cleanup() trap for the pod stop/delete calls
+# it runs alongside this.
+cleanup_ephemeral_ssh_key() {
+  if [[ -n "${SSH_KEY_FINGERPRINT:-}" ]]; then
+    if runpodctl_t ssh remove-key --fingerprint "$SSH_KEY_FINGERPRINT" >/dev/null 2>&1; then
+      log_ok "Removed the ephemeral SSH key ($SSH_KEY_FINGERPRINT) from your RunPod account."
+    else
+      log_warn "Could not remove the ephemeral SSH key ($SSH_KEY_FINGERPRINT) from your RunPod account automatically - remove it by hand at https://www.runpod.io/console/user/settings if you want it fully revoked."
+    fi
+  fi
+  [[ -n "${SSH_KEY_PATH:-}" ]] && rm -rf "$(dirname "$SSH_KEY_PATH")"
+}
+
+# Resolves $POD_ID's direct-TCP SSH endpoint (sets SSH_HOST/SSH_PORT) via
+# `runpodctl ssh info`, so callers can ssh straight into the pod's own public
+# IP with the ephemeral key from setup_ephemeral_ssh_key() above - no
+# Cloudflare tunnel, no console-only ssh.runpod.io proxy hash to guess.
+# This only works because
+# `runpodctl pod create` exposes 22/tcp by default (its --ssh flag, on
+# unless a caller passes --ports without 22/tcp - confirmed against
+# runpodctl's own source, internal/sshconnect/sshconnect.go: PublicSSHPort
+# only matches a runtime port with PrivatePort==22 and IsIpPublic==true).
+#
+# Polls rather than checking once: `runpodctl ssh info` reports "pod not
+# ready" for a bit after desiredStatus flips to RUNNING, because the
+# runtime port mapping lags behind it (confirmed live 2026-08-14 against a
+# pod that was already SSH-reachable by hand while this still failed).
+resolve_pod_ssh_endpoint() {
+  local waited=0 max_wait=90 info
+  while (( waited < max_wait )); do
+    info="$(runpodctl_t ssh info "$POD_ID" 2>/dev/null)" || true
+    SSH_HOST="$(jq -r '.ip // empty' <<< "$info")"
+    SSH_PORT="$(jq -r '.port // empty' <<< "$info")"
+    [[ -n "$SSH_HOST" && -n "$SSH_PORT" ]] && return 0
+    sleep 3
+    waited=$((waited + 3))
+  done
+  log_error "Could not resolve a direct SSH endpoint for pod $POD_ID after ${max_wait}s (needs 22/tcp exposed - see create_pod()). Last 'runpodctl ssh info' response: $info"
+  return 1
+}
+
 # Tightens a sensitive file to 600 (owner read/write only) if it isn't
 # already, warning so it's visible when it happens. Covers files we don't
 # fully control the creation of - e.g. runpodctl writes ~/.runpod/config.toml
@@ -141,11 +208,15 @@ confirm() {
 }
 
 # --- secrets: OS keyring (libsecret/Secret Service), not plaintext ---------
-# RUNPOD_API_KEY, VLLM_API_KEY, and CLOUDFLARE_TUNNEL_TOKEN live in the login
-# keyring instead of $CONFIG_FILE - the prior model was chmod 600 on a plain
-# file, fine for the throwaway no-passphrase SSH key (see setup_ssh_key's own
-# comment on why that one's low-value) but not for credentials that gate a
-# billed API account and a public endpoint. Needs `secret-tool` (Debian/
+# RUNPOD_API_KEY lives in the login keyring instead of $CONFIG_FILE - the
+# prior model was chmod 600 on a plain file, fine for the old throwaway
+# no-passphrase SSH key but not for a credential that gates a billed API
+# account. VLLM_API_KEY and CLOUDFLARE_TUNNEL_TOKEN used to live here too;
+# both are gone now (see load_secrets()'s migration below and
+# CHANGELOG.md) - the vLLM key is generated fresh per launch instead of
+# stored, and Cloudflare is out of the picture entirely (RunPod's own
+# per-pod proxy URL + the pod's own 22/tcp cover both jobs it used to do).
+# Needs `secret-tool` (Debian/
 # Ubuntu package libsecret-tools, Fedora/Arch libsecret) and a running,
 # unlocked Secret Service (GNOME Keyring or KWallet) in this session -
 # normally already true for a real desktop login. Not available in a
@@ -171,40 +242,32 @@ secret_clear() {
   secret-tool clear service "$SECRET_SERVICE" field "$field" >/dev/null 2>&1 || true
 }
 
-# Populates RUNPOD_API_KEY/VLLM_API_KEY/CLOUDFLARE_TUNNEL_TOKEN from the
-# keyring into the current shell. Also migrates them in place the first time
-# this runs against an old-format config: if `source "$CONFIG_FILE"` (which
-# the caller must do BEFORE calling this) left any of the three set as plain
-# shell vars, that means this is a pre-keyring config file with the secret
-# still sitting in plaintext - store it in the keyring and strip the line
-# from the file, so an existing install upgrades on its very next run
-# instead of needing --setup re-run and every credential re-pasted by hand.
+# Populates RUNPOD_API_KEY from the keyring into the current shell. Also
+# migrates it in place the first time this runs against an old-format
+# config: if `source "$CONFIG_FILE"` (which the caller must do BEFORE
+# calling this) left it set as a plain shell var, that means this is a
+# pre-keyring config file with the secret still sitting in plaintext -
+# store it in the keyring and strip the line from the file, so an existing
+# install upgrades on its very next run instead of needing --setup re-run.
+# Also clears out any VLLM_API_KEY/CLOUDFLARE_TUNNEL_TOKEN left behind by a
+# pre-ephemeral-key install (see CHANGELOG.md) - neither is read anymore,
+# no reason to leave them sitting in the keyring.
 load_secrets() {
   require_cmd secret-tool
-  local migrated=0
   if [[ -n "${RUNPOD_API_KEY:-}" ]]; then
     secret_store runpod_api_key "$RUNPOD_API_KEY"
     sed -i '/^RUNPOD_API_KEY=/d' "$CONFIG_FILE"
-    migrated=1
+    log_ok "Migrated RUNPOD_API_KEY out of $CONFIG_FILE and into the OS keyring - removed it from the plaintext file."
   fi
-  if [[ -n "${VLLM_API_KEY:-}" ]]; then
-    secret_store vllm_api_key "$VLLM_API_KEY"
-    sed -i '/^VLLM_API_KEY=/d' "$CONFIG_FILE"
-    migrated=1
+  if [[ -n "$(secret_lookup vllm_api_key)" || -n "$(secret_lookup cloudflare_tunnel_token)" ]]; then
+    secret_clear vllm_api_key
+    secret_clear cloudflare_tunnel_token
+    sed -i '/^VLLM_API_KEY=/d;/^CLOUDFLARE_TUNNEL_TOKEN=/d;/^CLOUDFLARE_SSH_HOSTNAME=/d;/^CLOUDFLARE_API_HOSTNAME=/d;/^SSH_KEY_PATH=/d' "$CONFIG_FILE"
+    log_ok "Removed the old VLLM_API_KEY/Cloudflare keyring entries and config lines - both are generated fresh per launch now instead of stored."
   fi
-  if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
-    secret_store cloudflare_tunnel_token "$CLOUDFLARE_TUNNEL_TOKEN"
-    sed -i '/^CLOUDFLARE_TUNNEL_TOKEN=/d' "$CONFIG_FILE"
-    migrated=1
-  fi
-  (( migrated == 1 )) && log_ok "Migrated RUNPOD_API_KEY/VLLM_API_KEY/CLOUDFLARE_TUNNEL_TOKEN out of $CONFIG_FILE and into the OS keyring - removed them from the plaintext file."
 
   RUNPOD_API_KEY="$(secret_lookup runpod_api_key)"
-  VLLM_API_KEY="$(secret_lookup vllm_api_key)"
-  CLOUDFLARE_TUNNEL_TOKEN="$(secret_lookup cloudflare_tunnel_token)"
   [[ -n "$RUNPOD_API_KEY" ]] || die "No RUNPOD_API_KEY in the OS keyring. Run 'startup.sh --setup' (or --rotate) to store one."
-  [[ -n "$VLLM_API_KEY" ]] || die "No VLLM_API_KEY in the OS keyring. Run 'startup.sh --setup' to generate one."
-  [[ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]] || die "No CLOUDFLARE_TUNNEL_TOKEN in the OS keyring. Run 'startup.sh --setup' (or --rotate) to store one."
 }
 
 # Safeword for free-text prompts (see prompt_text below). Distinct from the
@@ -258,11 +321,11 @@ create_network_volume() {
 }
 
 # --- credential validation ---------------------------------------------------
-# Both checks below exist so a key/token rotated or revoked outside this repo
-# (e.g. in the RunPod or Cloudflare dashboard) fails fast with a clear message
-# - at wizard setup, at the start of every normal launch, and from --rotate -
-# instead of surfacing later as a confusing runpodctl/cloudflared error, or on
-# the pod after a billed create_pod call already ran.
+# Exists so a key rotated or revoked outside this repo (e.g. in the RunPod
+# dashboard) fails fast with a clear message - at wizard setup, at the
+# start of every normal launch, and from --rotate - instead of surfacing
+# later as a confusing runpodctl error, or on the pod after a billed
+# create_pod call already ran.
 
 # Live validation call - confirmed to exist (runpodctl user / alias me), exact
 # output shape wasn't independently confirmed, so we only check exit status.
@@ -276,59 +339,6 @@ validate_runpod_api_key() {
   fi
 }
 
-# Cloudflare's dashboard shows the tunnel token embedded in a full install/
-# run command (e.g. Windows: "cloudflared.exe service install eyJh...",
-# Linux/run: "cloudflared tunnel run --token eyJh..."), and it's easy to
-# copy-paste the whole line by habit. The token itself is always base64 of
-# JSON starting with {"a": (account tag), so it always starts with "eyJhIjoi"
-# - extract just that so pasting the full command works as well as the bare
-# token.
-extract_cloudflare_token() {
-  grep -oE 'eyJhIjoi[A-Za-z0-9_+/=-]+' <<< "$1" | head -n1
-}
-
-# No cloudflared subcommand validates a token without actually connecting, so
-# this briefly runs `cloudflared tunnel run` and watches its log for the
-# success line ("Registered tunnel connection") or the rejection line
-# ("Unauthorized: ..."), then tears the connection down either way. Log
-# strings confirmed via Cloudflare's troubleshooting docs and community
-# reports of revoked-token errors (docs.cloudflare.com/cloudflare-one/
-# networks/connectors/cloudflare-tunnel/troubleshoot-tunnels/common-errors/).
-validate_cloudflare_tunnel_token() {
-  require_cmd cloudflared
-  local logfile
-  logfile="$(mktemp)"
-  # --loglevel/--logfile are TUNNEL COMMAND options and only take effect
-  # *before* the "run" subcommand (confirmed via `cloudflared tunnel run
-  # --help`, which lists them under "TUNNEL COMMAND OPTIONS" vs. --token
-  # under "SUBCOMMAND OPTIONS") - putting them after "run" silently drops
-  # them, leaving $logfile empty and this check permanently timing out
-  # regardless of whether the token is actually valid.
-  cloudflared tunnel --loglevel info --logfile "$logfile" run --token "$CLOUDFLARE_TUNNEL_TOKEN" \
-    >/dev/null 2>&1 &
-  local cf_pid=$!
-
-  local waited=0 max_wait=15 result="timeout"
-  while (( waited < max_wait )); do
-    if grep -q "Registered tunnel connection" "$logfile" 2>/dev/null; then
-      result="ok"; break
-    fi
-    if grep -qi "Unauthorized" "$logfile" 2>/dev/null; then
-      result="rejected"; break
-    fi
-    sleep 1; waited=$((waited + 1))
-  done
-
-  kill "$cf_pid" 2>/dev/null || true
-  wait "$cf_pid" 2>/dev/null || true
-  rm -f "$logfile"
-
-  case "$result" in
-    ok)       log_ok "Cloudflare tunnel token validated." ;;
-    rejected) die "CLOUDFLARE_TUNNEL_TOKEN was rejected (rotated/revoked?). Run 'startup.sh --rotate' to paste a fresh one." ;;
-    timeout)  die "Could not confirm the Cloudflare tunnel token within ${max_wait}s - check network connectivity, or run 'startup.sh --rotate' to paste a fresh one." ;;
-  esac
-}
 
 # Runs an ordered list of step functions (each named in the $1 array),
 # letting any step "go back" by returning 1 - the runner then re-invokes the

@@ -4,8 +4,8 @@
 # First run (or --setup): walks through the one-time setup wizard.
 # Every run after that: reuses last session's GPU/model choice (unless
 # --new is passed), creates a RunPod Secure Cloud pod running vLLM, and
-# waits for the OpenAI-compatible endpoint to actually respond through the
-# Cloudflare tunnel.
+# waits for the OpenAI-compatible endpoint to actually respond through
+# RunPod's own per-pod proxy URL.
 #
 # See PREREQUISITES.md for what has to exist before the wizard can run.
 set -euo pipefail
@@ -34,9 +34,9 @@ usage() {
 Usage: $0 [--setup] [--rotate] [--new] [--prewarm] [--prewarm-only] [--idle-minutes N] [--max-runtime-hours N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
 
   --setup                 Force the first-run setup wizard, even if config exists.
-  --rotate                Re-paste the RunPod API key and/or Cloudflare tunnel token,
-                           and/or regenerate the dedicated SSH keypair (whichever
-                           needs rolling), without redoing the rest of setup.
+  --rotate                Re-paste the RunPod API key, without redoing the rest of
+                           setup. The vLLM API key and SSH keypair are generated fresh
+                           on every launch already - nothing to rotate for either.
   --new                   Re-pick GPU/model instead of reusing the last session.
   --prewarm                Force a model-weights prewarm run on a cheap CPU pod even if
                            this volume is already marked prewarmed for this model, then
@@ -106,9 +106,9 @@ fi
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
-# Populates RUNPOD_API_KEY/VLLM_API_KEY/CLOUDFLARE_TUNNEL_TOKEN from the OS
-# keyring (migrating them out of the file above if this is a pre-keyring
-# config) - see load_secrets() in lib/common.sh.
+# Populates RUNPOD_API_KEY from the OS keyring (migrating it out of the
+# file above if this is a pre-keyring config) - see load_secrets() in
+# lib/common.sh.
 load_secrets
 # runpodctl is a separate process and only reads RUNPOD_API_KEY from its own
 # environment, not from vars merely set in this shell - the value load_secrets
@@ -120,7 +120,6 @@ export RUNPOD_API_KEY
 # Defense in depth: catches a credential file that ended up world/group-
 # readable, whether from a tool's own umask or a browser download, on every
 # run (not just at setup) so a permission regression doesn't sit unnoticed.
-secure_file "$SSH_KEY_PATH"
 secure_file "$HOME/.runpod/config.toml"
 
 if [[ "$ROTATE" == 1 ]]; then
@@ -128,10 +127,9 @@ if [[ "$ROTATE" == 1 ]]; then
   exit 0
 fi
 
-# Catches a key/token rotated or revoked outside this repo before anything
-# billed happens (network volume creation, pod creation), instead of it
-# surfacing later as a confusing runpodctl/cloudflared error.
+# Catches a key rotated or revoked outside this repo before anything billed
+# happens (network volume creation, pod creation), instead of it surfacing
+# later as a confusing runpodctl error.
 validate_runpod_api_key
-validate_cloudflare_tunnel_token
 
 run_normal_launch
