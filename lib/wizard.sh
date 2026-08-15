@@ -93,16 +93,40 @@ setup_datacenter() {
   log_info "use later (not every datacenter stocks every card)."
   log_info ""
   log_info "Fetching current datacenter / GPU availability..."
-  local dc_json
+  local dc_json gpu_json
   dc_json="$(runpodctl_t datacenter list)" || die "Could not list datacenters (or timed out after ${RUNPODCTL_TIMEOUT_SECS}s) - check availability at https://www.runpod.io/console/gpu-cloud instead."
+  # `datacenter list`'s own gpuAvailability[] can disagree with what `gpu
+  # list` (the endpoint list_available_gpus() in lib/launch.sh actually
+  # filters on at GPU-pick time) reports for the same datacenter - confirmed
+  # live 2026-08-15, e.g. EU-SE-1 showed RTX A5000 in stock via `datacenter
+  # list` but "none" via `gpu list`'s dataCenterAvailability. Since the
+  # datacenter choice below is a one-way lock (network volume), the stock
+  # shown here is pulled from `gpu list` instead so this menu doesn't
+  # advertise a card that GPU selection won't actually offer.
+  gpu_json="$(runpodctl_t gpu list)" || die "Could not list GPUs (or timed out after ${RUNPODCTL_TIMEOUT_SECS}s) - check availability at https://www.runpod.io/console/gpu-cloud instead."
 
-  # Field names (id, location, gpuAvailability[].displayName/.stockStatus)
-  # confirmed against live `runpodctl datacenter list` JSON output this
-  # session.
+  # Field names (gpuId, displayName, dataCenterAvailability[].dataCenterId/
+  # .stockStatus) confirmed against live `runpodctl gpu list` JSON output -
+  # same fields list_available_gpus() (lib/launch.sh) reads.
+  local -A dc_gpu_stock=()
+  local stock_dcid stock_gpus
+  while IFS=$'\t' read -r stock_dcid stock_gpus; do
+    [[ -z "$stock_dcid" ]] && continue
+    dc_gpu_stock["$stock_dcid"]="$stock_gpus"
+  done < <(jq -r '
+    [.[] | .displayName as $d | .dataCenterAvailability[]? | select(.stockStatus != "none") | {dc: .dataCenterId, name: $d}]
+    | group_by(.dc)
+    | map({dc: .[0].dc, gpus: ([.[].name] | join(", "))})
+    | .[]
+    | [.dc, .gpus] | @tsv
+  ' <<< "$gpu_json")
+
+  # Field names (id, location) confirmed against live `runpodctl datacenter
+  # list` JSON output this session.
   local menu_rows
   menu_rows="$(jq -r '
     .[]
-    | [.id, .location, ([.gpuAvailability[]? | select(.stockStatus != "" and .stockStatus != "none") | .displayName] | join(", "))]
+    | [.id, .location]
     | @tsv
   ' <<< "$dc_json")"
 
@@ -140,8 +164,9 @@ setup_datacenter() {
   # Build "<rank>\t<id>\t<location>\t<code>\t<tier>\t<gpus>" rows, then sort
   # rank ascending so outside-Eyes (rank 0) lands first, 14/9/5 after.
   local sortable="" id location gpus code tier rank
-  while IFS=$'\t' read -r id location gpus; do
+  while IFS=$'\t' read -r id location; do
     [[ -z "$id" ]] && continue
+    gpus="${dc_gpu_stock[$id]:-}"
     code="${loc_code[$location]:-}"
     # Generic/unmapped location -> the id's 2nd '-'-separated field is the
     # country code (EU-RO-1 -> RO, EUR-IS-1 -> IS); only reached when the
