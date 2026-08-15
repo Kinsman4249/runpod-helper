@@ -4,6 +4,14 @@
 
 ### Unreleased
 
+## [2.1.0] - 2026-08-14
+
+### Added
+- `--prewarm` (`startup.sh`) and `--prewarm-only` (`e2e-test.sh`), backed by new `lib/prewarm.sh`: downloads a preset's weights onto the network volume via a cheap CPU pod (2 vCPU/4GB, ~$0.06/hr - RunPod gives no way to size a CPU pod via `runpodctl`, confirmed live) instead of paying the real GPU's hourly rate to sit through the download. `--prewarm-only` skips creating a GPU pod entirely. Reintroduces the idea behind the pre-2.0.0 `--prewarm` flag removed alongside the custom image, rebuilt from scratch against the bare official images: for vLLM presets, a small Python image runs `hf download <repo>` into `HF_HOME` (the same standard HF Hub cache layout vLLM itself reads later); for llama.cpp presets, the real `ghcr.io/ggml-org/llama.cpp:server` (CPU-only) binary runs with `--n-gpu-layers 0`, guaranteeing the `LLAMA_CACHE` it writes is something a later real launch can actually reuse. Neither path puts `RUNPOD_API_KEY` on the prewarm pod - since a RunPod pod does not stop on its own when its process exits (confirmed live: it crash-loops instead), the prewarm pod instead serves a plain HTTP 200/503 on port 8000 and the existing `wait_for_vllm_ready()` polls it exactly like a real launch, so the local machine (not the pod) decides when to tear it down. Verified live end-to-end: prewarming `qwen3-coder-30b-moe` then launching it for real came up in 146s (pod-create to ready), against the multi-minute wait a fresh ~17GB download would otherwise cost at the GPU's hourly rate.
+
+### Fixed
+- `qwen3-coder-30b-moe` preset (`lib/launch.sh`) was pinned to `--quantization auto`, but `stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ`'s own `config.json` declares `compressed-tensors` explicitly - vLLM 0.27.1 rejects `auto` against a repo that already states a method (same failure class as `qwen3.6-27b-awq-mtp`, see 2.0.0 below), so the pod boot-looped on every launch attempt until this preset had an actual real GPU launch tested against it. Now pins `--quantization compressed-tensors`.
+
 ## [2.0.0] - 2026-08-14
 
 ### Added
