@@ -161,8 +161,21 @@ setup_datacenter() {
     [ES]=Spain [PL]=Poland [FI]=Finland [CH]=Switzerland [AT]=Austria
   )
 
-  # Build "<rank>\t<id>\t<location>\t<code>\t<tier>\t<gpus>" rows, then sort
-  # rank ascending so outside-Eyes (rank 0) lands first, 14/9/5 after.
+  # Build "<rank><id><location><code><tier><gpus>" rows (US-separated, see
+  # below), then sort rank ascending so outside-Eyes (rank 0) lands first,
+  # 14/9/5 after.
+  #
+  # Fields are joined/split on ASCII Unit Separator (\x1f), not a real tab.
+  # Confirmed live 2026-08-15: bash's `read` treats an all-whitespace IFS
+  # (tab included) as "IFS whitespace", which collapses RUNS of the
+  # delimiter and drops empty fields, same as it does for plain word
+  # splitting. `tier` is empty for every outside-Eyes datacenter (the
+  # recommended ones) whenever `gpus` isn't - i.e. constantly - so a
+  # tab-delimited round-trip silently shifts every field after the empty
+  # one, and `tier` ends up holding a GPU name that matches no `case`
+  # branch below, leaving `tag` unset. \x1f isn't classified as IFS
+  # whitespace, so `read` preserves empty fields with it.
+  local US=$'\x1f'
   local sortable="" id location gpus code tier rank
   while IFS=$'\t' read -r id location; do
     [[ -z "$id" ]] && continue
@@ -179,13 +192,13 @@ setup_datacenter() {
       9)   rank=2 ;;
       5)   rank=3 ;;
     esac
-    sortable+="$rank"$'\t'"$id"$'\t'"$location"$'\t'"$code"$'\t'"$tier"$'\t'"$gpus"$'\n'
+    sortable+="$rank$US$id$US$location$US$code$US$tier$US$gpus"$'\n'
   done <<< "$menu_rows"
-  sortable="$(printf '%s' "$sortable" | sort -t$'\t' -k1,1n -k2,2 -s)"
+  sortable="$(printf '%s' "$sortable" | sort -t"$US" -k1,1n -k2,2 -s)"
 
   local -a dc_ids=() dc_labels=()
   local rank_out cname loc_disp tag
-  while IFS=$'\t' read -r rank_out id location code tier gpus; do
+  while IFS="$US" read -r rank_out id location code tier gpus; do
     [[ -z "$id" ]] && continue
     cname="${cc_name[$code]:-}"
     # Prefer a resolved country name over a bare "Europe".
