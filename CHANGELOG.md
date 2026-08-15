@@ -4,6 +4,17 @@
 
 ### Unreleased
 
+## [2.2.0] - 2026-08-15
+
+### Added
+- New preset `qwen3.5-40b-deckard-gguf-40gb` (`lib/launch.sh`): same GGUF weights as `qwen3.5-40b-deckard-gguf` but capped at 196608 tokens (~192K) of context instead of the model's native 262144 max, sized to fit a 40GB VRAM floor using the same KV-cache formula as the existing preset's own `min_vram` calc.
+- `startup.sh` now offers to prewarm before a real GPU launch when there is no local record that the chosen preset's weights are already cached on the attached network volume (`is_marked_prewarmed`/`mark_prewarmed`, `lib/prewarm.sh`), instead of requiring the operator to remember `--prewarm` up front. The record is written after either a successful `--prewarm` run or a successful real launch, and lives at `~/.runpod-lab/prewarmed`.
+- `GOTCHAS.md`: non-obvious RunPod/dependency behavior confirmed live while building this repo (SSH-over-proxy's real address format, RunPod CPU pod sizing, EU-RO-1 network-volume tiers, vLLM's `--quantization auto` rejection against a repo with its own `quantization_method`, and more) - `README.md` now points to it.
+
+### Fixed
+- `qwen3.5-40b-deckard-gguf` confirmed live end-to-end for the first time: after prewarming its GGUF onto the network volume, pod-create to llamacpp-ready took 114s and `GET /v1/models` passed.
+- `wait_for_vllm_ready()` (`lib/launch.sh`) now returns 1 on a timeout instead of always reporting success, needed so the new prewarm-offer logic can tell a genuine ready state apart from a timeout before recording a preset as cached. Its three existing call sites (`startup.sh` via `run_normal_launch`, `e2e-test.sh`, `lib/prewarm.sh`) were bare calls under `set -euo pipefail` and would have aborted their script on any timeout without an added `|| true` at each - fixed alongside the return-value change so this ships without introducing that regression.
+
 ## [2.1.0] - 2026-08-14
 
 ### Added
