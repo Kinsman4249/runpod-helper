@@ -22,10 +22,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/launch.sh
 source "$SCRIPT_DIR/lib/launch.sh"
+# shellcheck source=lib/prewarm.sh
+source "$SCRIPT_DIR/lib/prewarm.sh"
 
 PRESET_NAME=""
 KEEP_POD=0
 CHECK_IDLE_SHUTDOWN=0
+PREWARM_ONLY=0
 IDLE_MINUTES=3
 MAX_RUNTIME_HOURS=1
 STORAGE_MODE="network-volume"
@@ -35,12 +38,19 @@ GPU_ID_OVERRIDE=""
 
 usage() {
   cat <<EOF
-Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--idle-minutes N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
+Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--prewarm-only] [--idle-minutes N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
 
   --preset NAME            Built-in preset to test (see lib/launch.sh's PRESET_TABLE
                             for values). Defaults to the smallest/fastest-loading one.
                             "custom" is not supported here - it has no known VRAM
                             floor to pick a GPU against.
+  --prewarm-only            Download this preset's weights onto the network volume via
+                            a cheap CPU pod (see lib/prewarm.sh), then exit - no GPU pod
+                            is created at all. Use this to cache a new model you want to
+                            test later without paying the GPU's hourly rate just to sit
+                            through the download. Requires --storage-mode network-volume
+                            (the default). Every other flag below except --preset,
+                            --storage-mode, and --debug is ignored in this mode.
   --keep                    Don't tear the pod down at the end - leave it running for
                             manual poking. YOU are responsible for stopping/deleting it.
                             Also skips starting the local idle-watchdog, since it would
@@ -79,6 +89,7 @@ while (( $# > 0 )); do
     --preset) PRESET_NAME="$2"; shift ;;
     --keep) KEEP_POD=1 ;;
     --check-idle-shutdown) CHECK_IDLE_SHUTDOWN=1 ;;
+    --prewarm-only) PREWARM_ONLY=1 ;;
     --idle-minutes) IDLE_MINUTES="$2"; shift ;;
     --storage-mode) STORAGE_MODE="$2"; shift ;;
     --no-logging) NUKE_LOGGING=1 ;;
@@ -138,6 +149,16 @@ resolve_preset() {
 }
 resolve_preset
 log_info "Preset: $PRESET_NAME (engine=$ENGINE, $MODEL_REPO, quantization=$MODEL_QUANTIZATION, min ${TEST_MIN_VRAM}GB VRAM)"
+
+# --- --prewarm-only: cache the weights, then stop - no GPU pod at all -------
+
+if [[ "$PREWARM_ONLY" == 1 ]]; then
+  [[ "$STORAGE_MODE" == "network-volume" ]] \
+    || die "--prewarm-only needs --storage-mode network-volume - there's nothing to keep warm on container-disk."
+  ensure_network_volume
+  run_prewarm
+  exit 0
+fi
 
 # --- pick the cheapest GPU meeting the floor ---------------------------------
 

@@ -17,10 +17,13 @@ source "$SCRIPT_DIR/lib/common.sh"
 source "$SCRIPT_DIR/lib/wizard.sh"
 # shellcheck source=lib/launch.sh
 source "$SCRIPT_DIR/lib/launch.sh"
+# shellcheck source=lib/prewarm.sh
+source "$SCRIPT_DIR/lib/prewarm.sh"
 
 SETUP=0
 ROTATE=0
 NEW_SESSION=0
+PREWARM=0
 IDLE_MINUTES=20
 MAX_RUNTIME_HOURS=4
 STORAGE_MODE="network-volume"
@@ -29,13 +32,21 @@ DEBUG=0
 
 usage() {
   cat <<EOF
-Usage: $0 [--setup] [--rotate] [--new] [--idle-minutes N] [--max-runtime-hours N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
+Usage: $0 [--setup] [--rotate] [--new] [--prewarm] [--idle-minutes N] [--max-runtime-hours N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
 
   --setup                 Force the first-run setup wizard, even if config exists.
   --rotate                Re-paste the RunPod API key, without redoing the rest of
                            setup. The vLLM API key and SSH keypair are generated fresh
                            on every launch already - nothing to rotate for either.
   --new                   Re-pick GPU/model instead of reusing the last session.
+  --prewarm                Before creating the real (billed-by-the-hour) GPU pod,
+                           download the chosen preset's weights onto the network
+                           volume via a cheap CPU pod first - see lib/prewarm.sh.
+                           Only useful with --storage-mode network-volume (the
+                           default); a no-op you don't need on container-disk,
+                           since nothing persists there either way. Use
+                           e2e-test.sh --prewarm-only instead if you just want to
+                           cache a model for later without launching anything.
   --idle-minutes N        Minutes with no vLLM request activity before the pod
                            auto-shuts-down (default 20). 0 disables idle auto-shutdown
                            entirely - see maybe_start_idle_watchdog() in lib/launch.sh.
@@ -71,6 +82,7 @@ while (( $# > 0 )); do
     --setup) SETUP=1 ;;
     --rotate) ROTATE=1 ;;
     --new) NEW_SESSION=1 ;;
+    --prewarm) PREWARM=1 ;;
     --idle-minutes) IDLE_MINUTES="$2"; shift ;;
     --max-runtime-hours) MAX_RUNTIME_HOURS="$2"; shift ;;
     --storage-mode) STORAGE_MODE="$2"; shift ;;
@@ -87,7 +99,7 @@ done
 [[ "$MAX_RUNTIME_HOURS" =~ ^[0-9]+$ ]] || die "--max-runtime-hours needs a number."
 [[ "$STORAGE_MODE" == "network-volume" || "$STORAGE_MODE" == "container-disk" ]] \
   || die "--storage-mode must be 'network-volume' or 'container-disk', got '$STORAGE_MODE'."
-export STORAGE_MODE
+export STORAGE_MODE PREWARM
 [[ "$DEBUG" == 1 ]] && enable_debug_logging startup "$DEBUG_MODE"
 
 if [[ ! -f "$CONFIG_FILE" || "$SETUP" == 1 ]]; then

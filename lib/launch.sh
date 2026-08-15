@@ -54,12 +54,13 @@ LLAMACPP_IMAGE_NAME="ghcr.io/ggml-org/llama.cpp:server-cuda"
 # for the AWQ presets is auto-detected by vLLM from each repo's own
 # config.json ("auto" here is literally passed as --quantization auto,
 # vLLM's own default - not a magic value, just makes the flag unconditional
-# for every preset including the on-the-fly ones below), EXCEPT
-# qwen3.6-27b-awq-mtp below: that repo's config.json declares
-# quantization_method "awq" explicitly, and vLLM 0.27.1 rejects
-# --quantization auto against a repo that already states a method
-# (pydantic ValidationError, confirmed live 2026-08-14 boot-looping the
-# pod) - so that preset pins "awq" instead of "auto". min_vram is a floor
+# for every preset including the on-the-fly ones below), EXCEPT two repos
+# whose own config.json declares a quantization_method explicitly - vLLM
+# 0.27.1 rejects --quantization auto against either (pydantic
+# ValidationError, confirmed live 2026-08-14 boot-looping the pod both
+# times), so each pins its real method instead of "auto":
+# qwen3.6-27b-awq-mtp ("awq") and qwen3-coder-30b-moe ("compressed-tensors").
+# min_vram is a floor
 # (the GPU list is still filtered live against it, same as the old preset
 # system), not a recommendation - a bigger card than the floor buys more
 # KV-cache headroom and lets you push max-model-len higher than the
@@ -88,7 +89,7 @@ LLAMACPP_IMAGE_NAME="ghcr.io/ggml-org/llama.cpp:server-cuda"
 PRESET_TABLE='
 deepseek-r1-distill-32b|vllm|casperhansen/deepseek-r1-distill-qwen-32b-awq|deepseek-r1-32b|24|16384|auto|-|DeepSeek-R1-Distill-Qwen-32B (AWQ, ~19GB) - dense reasoning model
 qwen3-32b|vllm|Qwen/Qwen3-32B-AWQ|qwen3-32b|24|16384|auto|-|Qwen3-32B (AWQ, ~19GB) - dense general-purpose
-qwen3-coder-30b-moe|vllm|stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ|qwen3-coder-30b|24|32768|auto|-|Qwen3-Coder-30B-A3B (AWQ, MoE ~3B active, ~17GB) - the Qwen Code MoE you asked for
+qwen3-coder-30b-moe|vllm|stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ|qwen3-coder-30b|24|32768|compressed-tensors|-|Qwen3-Coder-30B-A3B (AWQ, MoE ~3B active, ~17GB, quantization pinned to compressed-tensors - verified live 2026-08-14: this repos own config.json declares that method and vLLM 0.27.1 rejects --quantization auto against it, same failure class as qwen3.6-27b-awq-mtp below) - the Qwen Code MoE you asked for
 qwen2.5-72b|vllm|Qwen/Qwen2.5-72B-Instruct-AWQ|qwen2.5-72b|48|8192|auto|-|Qwen2.5-72B-Instruct (AWQ, ~41GB) - bigger dense option
 llama3.3-70b|vllm|casperhansen/llama-3.3-70b-instruct-awq|llama3.3-70b|48|8192|auto|-|Llama-3.3-70B-Instruct (AWQ, ~39GB) - non-Qwen/DeepSeek alternative in range
 qwen3.5-40b-deckard|vllm|DavidAU/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking|qwen3.5-40b-deckard|80|262144|fp8|--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager|Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking (hybrid Gated DeltaNet/full-attention, bf16 repo, on-the-fly FP8 ~40GB weights, 256K context, needs an 80GB+ card - see CHANGELOG.md) - uncensored, tuned for tool use
@@ -563,6 +564,8 @@ run_normal_launch() {
     log_info "STORAGE_MODE=container-disk: no network volume, model weights will download fresh onto the pod's own disk this run."
   fi
   pick_preset_and_gpu
+
+  [[ "${PREWARM:-0}" == 1 ]] && run_prewarm
 
   create_pod
   wait_for_pod_ready
