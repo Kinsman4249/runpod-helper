@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Pushes a launch's baseURL/apiKey into Kilo Code's and opencode's configs
-# inside vscodium-box, so either can reach the pod without hand-editing JSON
-# after every launch.
+# Pushes a launch's baseURL/apiKey into Kilo Code's, opencode's, and DeepSeek
+# Harness's configs inside vscodium-box, so any of them can reach the pod
+# without hand-editing config after every launch.
 #
 # Why this is needed: this repo generates a brand-new proxy URL and a
 # one-off API key on every launch - no stable hostname, nothing stored, by
@@ -29,6 +29,30 @@
 # files, so add an entry to CONFIGS below if you install one and hit this
 # same staleness problem.
 #
+# Kilo Code needs a restart after this script runs; opencode does not. Kilo
+# caches the provider's API key (and, in practice, the rest of the provider
+# config with it) in its own sqlite store on session start
+# (~/.local/share/kilo/kilo.db, `credential` table, one `Imported` row) and
+# doesn't appear to re-read kilo.jsonc per request - confirmed live
+# 2026-08-15, a running Kilo session kept 404ing against an already-replaced
+# pod's proxy hostname well after this script had rewritten kilo.jsonc with
+# the new one. Reload the VSCodium window or quit/relaunch Kilo after every
+# re-sync. See GOTCHAS.md for the full writeup.
+#
+# DeepSeek Harness is a third case, structurally different from the other
+# two: its config (`$DSH_HOME/settings.yaml`, `~/.dsh/settings.yaml` when
+# unset) is YAML, not JSON, so the shared jq filter below can't touch it -
+# it gets its own yq-based block. It also only supports `apiKeyEnv` (a
+# credential *reference*), never a literal key in the file
+# (@deepseek-ai/dsh-llm-pi-ai's own README, "Supported profile fields" -
+# apiKey is not among them), so the key itself has nowhere to live in YAML
+# and instead gets exported from `~/.bashrc` under CONTAINER_HOME. That file
+# is only sourced by *interactive non-login* shells (confirmed live: `bash
+# -lc`, what this script's own commands and `podman exec`'s default use, does
+# NOT source it; `bash -ic` does) - which is exactly what VSCodium's
+# integrated terminal opens, so `dsh` run there picks it up, but it needs a
+# new terminal (not a reload) to see a re-synced key.
+#
 # lib/launch.sh calls this script directly with --base-url/--api-key/--model
 # right after a launch, offering to run it via a y/N prompt (confirm() in
 # lib/common.sh) - see run_normal_launch. The piped/--log modes below exist
@@ -53,7 +77,7 @@ set -euo pipefail
 
 # Bump this whenever the script's parsing or write logic changes. Only shown
 # in --debug output, so you can tell which version produced a given log.
-BUILD="2026.08.15-3"
+BUILD="2026.08.15-4"
 
 PROVIDER_NAME="runpod-helper"
 
@@ -127,7 +151,10 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'
+      # Everything between the shebang and `set -euo pipefail` - a line
+      # count would go stale every time this comment block grows (it
+      # already had, cutting the old Usage list off mid-way).
+      awk 'NR>1 && /^set -euo pipefail/ { exit } NR>1' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -227,5 +254,69 @@ for entry in "${CONFIGS[@]}"; do
   mv "$TMP_FILE" "$config_file"
   trap - EXIT
 done
+
+# --- DeepSeek Harness: separate block, see the file header for why -----------
+DSH_CONFIG="${CONTAINER_HOME}/.dsh/settings.yaml"
+DSH_API_KEY_ENV_NAME="RUNPOD_HELPER_API_KEY"
+DSH_BASHRC="${CONTAINER_HOME}/.bashrc"
+
+if ! command -v yq >/dev/null 2>&1 || ! yq --version 2>&1 | grep -q mikefarah; then
+  echo "Note: mikefarah/yq not found (https://github.com/mikefarah/yq#install)" >&2
+  echo "  - skipping DeepSeek Harness's settings.yaml (Kilo Code and opencode are unaffected)." >&2
+else
+  mkdir -p "$(dirname "$DSH_CONFIG")"
+  if [ ! -f "$DSH_CONFIG" ]; then
+    echo "No existing $DSH_CONFIG - creating one with just the $PROVIDER_NAME provider."
+    printf '{}' > "$DSH_CONFIG"
+  fi
+
+  echo "Writing into:  $DSH_CONFIG"
+
+  TMP_FILE="$(mktemp "${DSH_CONFIG}.XXXXXX")"
+  trap 'rm -f "$TMP_FILE"' EXIT
+
+  # Same fill-if-absent-vs-always-refresh split as the jq filter above, but
+  # spelled as `.x = (.x // "default")` instead of jq's `//=` - confirmed
+  # live (yq v4.53.3), `//=` anywhere in this expression breaks the `//`
+  # used lower down for the models-array fallback with "'//' expects 2 args
+  # but there is 1", even though each works fine on its own. `models` is a
+  # YAML array (not a dict like the jq configs' `.models[$model]`), so
+  # switching between launch presets needs an explicit append-if-missing
+  # instead of a keyed merge, to avoid re-adding a duplicate entry on every
+  # re-sync of the same model. yq has no jq-style if/then/else/end either -
+  # `select(cond) // fallback` stands in for it.
+  PROVIDER_NAME="$PROVIDER_NAME" BASE_URL="$BASE_URL" MODEL_NAME="$MODEL_NAME" \
+  DSH_API_KEY_ENV_NAME="$DSH_API_KEY_ENV_NAME" \
+    yq '
+      .["llm-pi-ai"].providers[strenv(PROVIDER_NAME)].displayName = (
+        .["llm-pi-ai"].providers[strenv(PROVIDER_NAME)].displayName // "RunPod Helper"
+      ) |
+      .["llm-pi-ai"].providers[strenv(PROVIDER_NAME)].api = "openai-completions" |
+      .["llm-pi-ai"].providers[strenv(PROVIDER_NAME)].baseURL = strenv(BASE_URL) |
+      .["llm-pi-ai"].providers[strenv(PROVIDER_NAME)].apiKeyEnv = strenv(DSH_API_KEY_ENV_NAME) |
+      .["llm-pi-ai"].providers[strenv(PROVIDER_NAME)].models = (
+        (.["llm-pi-ai"].providers[strenv(PROVIDER_NAME)].models // []) as $existing |
+        ($existing | select([$existing.[].id] | contains([strenv(MODEL_NAME)])))
+          // ($existing + [{"id": strenv(MODEL_NAME)}])
+      ) |
+      .["agent-default-model"].provider = strenv(PROVIDER_NAME) |
+      .["agent-default-model"].model = strenv(MODEL_NAME)
+    ' "$DSH_CONFIG" > "$TMP_FILE"
+
+  chmod --reference="$DSH_CONFIG" "$TMP_FILE" 2>/dev/null || chmod 0600 "$TMP_FILE"
+  mv "$TMP_FILE" "$DSH_CONFIG"
+  trap - EXIT
+
+  # The key itself can't go in settings.yaml (see file header) - export it
+  # from ~/.bashrc instead, replacing a previous export of the same name so
+  # re-syncing doesn't pile up duplicate lines.
+  touch "$DSH_BASHRC"
+  if grep -q "^export ${DSH_API_KEY_ENV_NAME}=" "$DSH_BASHRC"; then
+    sed -i "s|^export ${DSH_API_KEY_ENV_NAME}=.*|export ${DSH_API_KEY_ENV_NAME}=\"${API_KEY}\"|" "$DSH_BASHRC"
+  else
+    printf '\nexport %s="%s"\n' "$DSH_API_KEY_ENV_NAME" "$API_KEY" >> "$DSH_BASHRC"
+  fi
+  echo "Writing into:  $DSH_BASHRC (export ${DSH_API_KEY_ENV_NAME}=...)"
+fi
 
 echo "Done. The $PROVIDER_NAME provider under $CONTAINER_HOME now points at the pod above."
