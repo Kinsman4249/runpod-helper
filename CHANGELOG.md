@@ -4,6 +4,11 @@
 
 ### Unreleased
 
+## [2.4.3] - 2026-08-15
+
+### Fixed
+- Datacenter picker (`setup_datacenter`, `lib/wizard.sh`) crashed with "tag: unbound variable" while building the menu label for any GPU-stocked datacenter outside the 5/9/14 Eyes groupings - the common, recommended case (confirmed live against India, Iceland, Romania, and Czechia). Cause: the picker's internal row format was tab-delimited and re-parsed with `IFS=$'\t' read`, but bash treats tab as "IFS whitespace" and collapses runs of it, dropping empty fields the same way plain word-splitting does. The `tier` field is empty for every outside-Eyes datacenter, so whenever the following `gpus` field was non-empty, the empty `tier` field vanished and every field after it shifted left, leaving `tier` holding a GPU name that matched no `case` branch and `tag` unset. Rows are now delimited with the ASCII Unit Separator (`\x1f`) instead of a tab, which bash does not collapse, so empty fields round-trip correctly.
+
 ## [2.4.2] - 2026-08-15
 
 ### Fixed
