@@ -4,6 +4,13 @@
 
 ### Unreleased
 
+## [2.6.0] - 2026-08-15
+
+### Added
+
+- New `sync-runpod-endpoint.sh` script (moved here from `vscodium-for-immutable`, where it lived first as a standalone consumer script) that writes a launch's baseURL, API key, and model name into Kilo Code's and opencode's configs inside vscodium-box. It reaches the config files through vscodium-box's private-home bind mount, so no podman exec or running container is needed. Alongside its original piped-stdin and `--log FILE` modes, it now also accepts `--base-url`, `--api-key`, and `--model` flags for syncing explicit values directly (all three required together).
+- After a normal launch, `run_normal_launch` now asks (a y/N prompt, default N) whether to run `sync-runpod-endpoint.sh` automatically with that launch's endpoint, API key, and model; declining leaves the launch unaffected, and a sync failure only logs a warning rather than aborting the launch.
+
 ## [2.5.0] - 2026-08-15
 
 ### Added
