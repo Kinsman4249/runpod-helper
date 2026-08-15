@@ -144,6 +144,10 @@ pick_preset_and_gpu() {
       MODEL_QUANTIZATION="${MODEL_QUANTIZATION:-auto}"
       MODEL_EXTRA_ARGS="${MODEL_EXTRA_ARGS:--}"
       ENGINE="${ENGINE:-vllm}"
+      # Floor the capacity-failure fallback (offer_alternate_gpu) re-lists
+      # against. Sessions saved before this var existed don't have it; 0 just
+      # means "show every available card" in that fallback, which is fine.
+      GPU_MIN_VRAM="${MIN_VRAM:-0}"
       log_info "Reusing last session: model=$MODEL_REPO gpu=$GPU_ID max-model-len=$MAX_MODEL_LEN (pass --new to change)."
       return
     }
@@ -259,11 +263,61 @@ pick_preset_and_gpu() {
     esac
   done
 
+  # The VRAM floor this model was picked against - saved so a later reused
+  # session (and the capacity-failure fallback offer_alternate_gpu below) can
+  # re-list GPUs against the same floor. Also exported as a global for this
+  # run's own fallback.
+  GPU_MIN_VRAM="$min_vram"
+
   mkdir -p "$CONFIG_DIR"
   ( umask 077
-    printf 'MODEL_PRESET=%q\nENGINE=%q\nMODEL_REPO=%q\nSERVED_MODEL_NAME=%q\nGPU_ID=%q\nMAX_MODEL_LEN=%q\nMODEL_QUANTIZATION=%q\nMODEL_EXTRA_ARGS=%q\n' \
-      "$MODEL_PRESET" "$ENGINE" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$GPU_ID" "$MAX_MODEL_LEN" "$MODEL_QUANTIZATION" "$MODEL_EXTRA_ARGS" > "$LAST_SESSION_FILE"
+    printf 'MODEL_PRESET=%q\nENGINE=%q\nMODEL_REPO=%q\nSERVED_MODEL_NAME=%q\nGPU_ID=%q\nMAX_MODEL_LEN=%q\nMODEL_QUANTIZATION=%q\nMODEL_EXTRA_ARGS=%q\nMIN_VRAM=%q\n' \
+      "$MODEL_PRESET" "$ENGINE" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$GPU_ID" "$MAX_MODEL_LEN" "$MODEL_QUANTIZATION" "$MODEL_EXTRA_ARGS" "$min_vram" > "$LAST_SESSION_FILE"
   )
+}
+
+# --- capacity-failure fallback ----------------------------------------------
+# RunPod's `gpu list` (list_available_gpus) reflects datacenter-wide stock, but
+# an individual `pod create` can still be rejected with a graphql "This machine
+# does not have the resources to deploy your pod. Please try a different
+# machine" error when the specific host it tried is momentarily full. create_pod
+# classifies that as retryable (returns 2 instead of dying); this re-lists the
+# cards still meeting the model's VRAM floor, drops the one that just failed,
+# and lets you pick another to retry with. Returns 0 with GPU_ID updated to
+# retry, or 1 to give up (no alternatives, or you backed out).
+offer_alternate_gpu() {
+  local failed_gpu="$1"
+  log_info ""
+  log_info "Re-checking live GPU availability in $DATACENTER_ID for another card meeting the ${GPU_MIN_VRAM:-0}GB+ floor..."
+  local menu_rows
+  menu_rows="$(list_available_gpus "${GPU_MIN_VRAM:-0}")" || {
+    log_error "No GPUs meeting the ${GPU_MIN_VRAM:-0}GB+ floor are available in $DATACENTER_ID right now. Try again shortly, or check https://www.runpod.io/console/gpu-cloud."
+    return 1
+  }
+
+  local -a gpu_ids=() gpu_labels=()
+  while IFS=$'\t' read -r gid dname vram price stock; do
+    [[ "$gid" == "$failed_gpu" ]] && continue   # the card that just failed - don't re-offer it
+    gpu_ids+=("$gid")
+    gpu_labels+=("$(printf '%-20s %5sGB  $%s/hr  [%s]' "$dname" "$vram" "$price" "$stock")")
+  done <<< "$menu_rows"
+  (( ${#gpu_ids[@]} > 0 )) || {
+    log_error "No other GPUs meeting the ${GPU_MIN_VRAM:-0}GB+ floor are available right now besides the one that just failed. Try again shortly."
+    return 1
+  }
+
+  log_info ""
+  log_info "Other available GPUs in $DATACENTER_ID (secure cloud \$/hr):"
+  local gpu_choice
+  select_from_menu "Choose a different GPU to retry with" gpu_choice "${gpu_labels[@]}" || return 1
+  GPU_ID="${gpu_ids[$((gpu_choice - 1))]}"
+
+  # Keep last-session pointed at the card we're actually retrying with, so a
+  # later plain `./startup.sh` reuse doesn't jump straight back to the one that
+  # had no capacity. Best-effort - a missing/unwritable file just means the
+  # next run re-picks normally.
+  [[ -f "$LAST_SESSION_FILE" ]] && sed -i "s|^GPU_ID=.*|GPU_ID=$(printf '%q' "$GPU_ID")|" "$LAST_SESSION_FILE"
+  log_info "Retrying with GPU $GPU_ID..."
 }
 
 # --- network volume check ---------------------------------------------------
@@ -377,6 +431,18 @@ create_pod() {
   local -a extra_flags=()
   [[ -n "${MODEL_EXTRA_ARGS:-}" && "$MODEL_EXTRA_ARGS" != "-" ]] && read -ra extra_flags <<< "$MODEL_EXTRA_ARGS"
 
+  # User-supplied engine flags from --extra-args (startup.sh/e2e-test.sh),
+  # appended verbatim to whichever engine's serve command runs below - for when
+  # a model/quant needs a knob this script doesn't expose (e.g. vLLM's
+  # --rope-scaling / --tensor-parallel-size, or llama.cpp's --split-mode /
+  # --override-kv). Applied AFTER the preset's own MODEL_EXTRA_ARGS so a user
+  # value wins on any flag the CLI takes last-one-wins. Space-split like
+  # MODEL_EXTRA_ARGS, so an individual flag VALUE can't itself contain spaces -
+  # fine for engine flags, which don't. Not applied to the prewarm pod (it only
+  # downloads weights - see lib/prewarm.sh).
+  local -a user_flags=()
+  [[ -n "${USER_EXTRA_ARGS:-}" ]] && read -ra user_flags <<< "$USER_EXTRA_ARGS"
+
   local docker_args env_json
   if [[ "${ENGINE:-vllm}" == "llamacpp" ]]; then
     # --hf-repo takes MODEL_REPO's own "<repo>:<quant tag>" form directly
@@ -399,6 +465,7 @@ create_pod() {
       --n-gpu-layers 999 \
       --metrics \
       "${extra_flags[@]}" \
+      "${user_flags[@]}" \
       "${log_flags[@]}")"
 
     # LLAMA_CACHE on the network volume (when attached): the downloaded
@@ -423,6 +490,7 @@ create_pod() {
       --quantization "${MODEL_QUANTIZATION:-auto}" \
       --api-key "$VLLM_API_KEY" \
       "${extra_flags[@]}" \
+      "${user_flags[@]}" \
       "${log_flags[@]}")"
 
     # HF_HOME on the network volume (when attached): weights persist across
@@ -458,7 +526,14 @@ create_pod() {
   local image_name="$IMAGE_NAME"
   [[ "${ENGINE:-vllm}" == "llamacpp" ]] && image_name="$LLAMACPP_IMAGE_NAME"
 
-  local create_output
+  # Capture stderr separately (a temp file, not 2>&1): runpodctl prints its
+  # graphql error JSON to stderr, not stdout - confirmed live 2026-08-15, where
+  # a capacity failure left our old `die` message's "Raw output:" (stdout only)
+  # completely blank. Keeping the streams apart means a stray stderr warning on
+  # an OTHERWISE-successful create can't corrupt the stdout JSON that jq parses
+  # for .id below, while still giving us the error text to classify/print.
+  local create_output errfile create_err rc=0
+  errfile="$(mktemp "${TMPDIR:-/tmp}/runpod-lab-create.XXXXXX")"
   create_output="$(runpodctl_t pod create \
     --cloud-type SECURE \
     --gpu-id "$GPU_ID" \
@@ -468,7 +543,22 @@ create_pod() {
     --name "runpod-lab-$(date +%s)" \
     --ports "8000/http" \
     --env "$env_json" \
-    --docker-args "$docker_args")" || die "Pod creation failed. Raw output:\n$create_output"
+    --docker-args "$docker_args" 2>"$errfile")" || rc=$?
+  create_err="$(cat "$errfile")"; rm -f "$errfile"
+
+  if (( rc != 0 )); then
+    # Capacity/placement failures are the one class worth retrying on a
+    # different card rather than aborting: RunPod stocks a GPU type
+    # datacenter-wide (so list_available_gpus shows it) but a specific host can
+    # still be full at create time. Return 2 so the caller can offer another
+    # card (offer_alternate_gpu / e2e's auto-advance); everything else is fatal.
+    if grep -qiE 'resources to deploy|different machine|no( longer)? .*instances|instances available|out of capacity|no capacity|insufficient capacity' \
+         <<< "$create_err"$'\n'"$create_output"; then
+      log_warn "RunPod couldn't place a pod on GPU '$GPU_ID' right now: ${create_err:-$create_output}"
+      return 2
+    fi
+    die "Pod creation failed (rc=$rc):"$'\n'"${create_err:-$create_output}"
+  fi
 
   # Picking specific fields (rather than printing $create_output raw) is
   # deliberate: the response echoes back both the --env payload and the
@@ -589,7 +679,17 @@ run_normal_launch() {
 
   [[ "${PREWARM:-0}" == 1 ]] && run_prewarm
 
-  create_pod
+  # create_pod returns 2 on a retryable capacity failure (the specific host had
+  # no room, even though the card showed stock) - loop, offering a different
+  # card each time, until one deploys or there are none left / you back out.
+  # Any other create failure still dies inside create_pod. `|| rc=$?` keeps
+  # set -e from aborting on the non-zero return we handle here ourselves.
+  local rc
+  while true; do
+    rc=0; create_pod || rc=$?
+    (( rc == 0 )) && break
+    offer_alternate_gpu "$GPU_ID" || die "Pod creation failed: no GPU with free capacity to deploy on. Try again shortly, or check https://www.runpod.io/console/gpu-cloud."
+  done
   wait_for_pod_ready
   # || true: a timeout here is a warning, not a fatal error (see
   # wait_for_vllm_ready's own comment) - under set -e a bare failing call

@@ -11,50 +11,57 @@ beyond the model-weights cache and a one-off SSH key per pod.
 - `startup.sh` (runs on your own machine): pick a GPU tier and model
   once, then silently reuse that choice on every future run (`--new` to
   change it). Creates the RunPod Secure Cloud pod, attaches the
-  persistent model-weights volume, waits for the pod's own SSH to come
-  up, then polls the OpenAI-compatible endpoint itself (RunPod's
-  `https://<pod-id>-8000.proxy.runpod.net`) until vLLM has finished
-  loading the model and is actually serving.
-- Model serving: [vLLM](https://docs.vllm.ai)'s own official
-  `vllm/vllm-openai` image, run directly with no custom Dockerfile or
-  entrypoint at all (dropped 2026-08-14 - see CHANGELOG.md) - it's the
-  same image RunPod's own community "vLLM" pod templates all wrap, so
-  it's typically already cache-warm on RunPod's nodes. Everything
-  model/runtime-specific arrives as CLI flags appended to the image's own
-  fixed `vllm serve` entrypoint (see `create_pod()` in `lib/launch.sh`).
-  There's no sshd on the pod at all as a result - diagnostics go through
-  RunPod's own SSH-over-proxy instead (`resolve_pod_ssh_proxy_host()` in
-  `lib/common.sh`), which execs into the container on RunPod's own side
-  without needing one.
-- Seven built-in model presets in the 27-90B range (quantized so they
-  fit a single GPU - AWQ for five, vLLM's own on-the-fly FP8 for the
-  sixth, and an AWQ hybrid Gated-DeltaNet model for the seventh):
+  persistent model-weights volume, then polls the OpenAI-compatible
+  endpoint itself (RunPod's `https://<pod-id>-8000.proxy.runpod.net`)
+  until the engine has finished loading the model and is actually
+  serving. If RunPod rejects the create because the chosen card's host
+  has no free capacity (it can, even when `gpu list` shows that GPU in
+  stock), it offers the other available cards meeting the model's VRAM
+  floor to retry with instead of failing outright.
+- Model serving: two engines, each its own official upstream image run
+  directly with no custom Dockerfile or entrypoint (dropped 2026-08-14 -
+  see CHANGELOG.md). [vLLM](https://docs.vllm.ai)'s `vllm/vllm-openai`
+  for the AWQ/FP8 presets (the same image RunPod's community "vLLM"
+  templates wrap, so it's typically cache-warm on their nodes), and
+  [llama.cpp](https://github.com/ggml-org/llama.cpp)'s
+  `ghcr.io/ggml-org/llama.cpp:server-cuda` for the GGUF presets, which
+  downloads a GGUF straight from Hugging Face via `--hf-repo`. Everything
+  model/runtime-specific arrives as CLI flags appended to each image's
+  own fixed entrypoint (`vllm serve` / `llama-server`) - see
+  `create_pod()` in `lib/launch.sh`. There's no sshd on either image, so
+  diagnostics go through RunPod's own SSH-over-proxy instead
+  (`resolve_pod_ssh_proxy_host()` in `lib/common.sh`), which execs into
+  the container on RunPod's own side without needing one.
+- Nine built-in model presets in the 27-72B range, quantized so they fit
+  a single GPU - seven served with vLLM (five AWQ, one on-the-fly FP8,
+  one AWQ hybrid Gated-DeltaNet), two GGUF served with llama.cpp:
   DeepSeek-R1-Distill-Qwen-32B, Qwen3-32B, Qwen3-Coder-30B-A3B (MoE),
   Qwen2.5-72B-Instruct, Llama-3.3-70B-Instruct,
-  Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking, and
-  Qwen3.6-27B-AWQ-MTP - plus a `custom` option to paste any Hugging Face
-  repo id, with a prompt to grow the network volume if it needs more
-  room than the presets assume. See `lib/launch.sh`'s `PRESET_TABLE` for
-  the exact repos, quantization methods, extra `vllm serve` flags (some
-  hybrid-attention models need `--gpu-memory-utilization`/
-  `--kv-cache-dtype` tuning beyond vLLM's defaults - see that file's
-  comment), and VRAM floors.
-- `vllm serve` is gated with a one-off bearer-token API key (vLLM's own
-  `--api-key` flag) generated fresh per launch, since RunPod's proxy URL
-  for the endpoint is otherwise open to anyone who guesses it.
+  Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking (and a
+  GGUF build of it in two context sizes), and Qwen3.6-27B-AWQ-MTP - plus
+  a `custom` option to paste any Hugging Face repo id, with a prompt to
+  grow the network volume if it needs more room than the presets assume.
+  See `lib/launch.sh`'s `PRESET_TABLE` for the exact repos, engines,
+  quantization methods, extra serve flags (some hybrid-attention models
+  need `--gpu-memory-utilization`/`--kv-cache-dtype` tuning beyond the
+  defaults - see that file's comment), and VRAM floors.
+- The endpoint is gated with a one-off bearer-token API key (the engine's
+  own `--api-key` flag) generated fresh per launch, since RunPod's proxy
+  URL for the endpoint is otherwise open to anyone who guesses it.
   `--ports "8000/http"` on `pod create` is what actually makes that URL
   route at all - RunPod's proxy does not auto-detect a listening port
   (confirmed live 2026-08-14 after this being silently missing caused
   every previous launch to look like a failure; see CHANGELOG.md).
 - `idle-watchdog.sh` (runs on YOUR machine, not the pod - moved there
-  2026-08-14 along with the custom image, since the bare vLLM image has
+  2026-08-14 along with the custom image, since the bare images have
   no room to host a second background process): after a configurable
-  idle period with zero vLLM request activity (polled via vLLM's own
-  `/metrics` endpoint through RunPod's proxy), stops and deletes the pod
-  via `runpodctl` - the actual cost-control mechanism for the whole
-  design (the `--terminate-after` flag `create_pod()` sets is a second,
-  independent backstop in case this process itself hangs, crashes, or
-  your machine goes to sleep). `--idle-minutes 0` disables it.
+  idle period with zero request activity (polled via the engine's own
+  `/metrics` endpoint through RunPod's proxy - engine-aware, vLLM's
+  counters or llama.cpp's), stops and deletes the pod via `runpodctl` -
+  the actual cost-control mechanism for the whole design (the
+  `--terminate-after` flag `create_pod()` sets is a second, independent
+  backstop in case this process itself hangs, crashes, or your machine
+  goes to sleep). `--idle-minutes 0` disables it.
 - `--storage-mode container-disk` (default: `network-volume`) skips the
   network volume entirely and uses a bigger, local, per-pod disk
   instead - faster reads, but the model re-downloads every launch and
@@ -62,12 +69,13 @@ beyond the model-weights cache and a one-off SSH key per pod.
   `lib/launch.sh`'s `CONTAINER_DISK_GB_STANDALONE` comment; run
   `e2e-test.sh --storage-mode <mode>` with each value to compare actual
   wall-clock time for your own model/GPU choice.
-- `--no-logging` disables vLLM's stats/access logging for the pod, on
-  top of vLLM's own default of not logging prompt/response content.
+- `--no-logging` disables the engine's stats/access logging for the pod
+  (vLLM or llama.cpp, whichever the preset uses), on top of each engine's
+  own default of not logging prompt/response content.
 - RUNPOD_API_KEY lives in the OS keyring (`secret-tool`/libsecret), not
   `~/.runpod-lab/config` - see `load_secrets()` in `lib/common.sh`. An
   existing plaintext config from before this change migrates
-  automatically on the next run. The vLLM API key and the pod's SSH
+  automatically on the next run. The endpoint API key and the pod's SSH
   keypair aren't stored anywhere at all - both are generated fresh per
   launch (see `create_pod()` in `lib/launch.sh`) and printed once in the
   launch summary.
@@ -114,6 +122,93 @@ pod, its one-off SSH key and API key, shutdown - just happens.
 See [PREREQUISITES.md](./PREREQUISITES.md) for the itemized list of what
 needs to exist on RunPod before that first run, including datacenter
 privacy tradeoffs and GPU/volume sizing guidance for each model preset.
+
+## Command-line flags
+
+All flags are optional - a bare `./startup.sh` reuses your last session
+and launches. `./startup.sh --help` prints this same list.
+
+### Session and setup
+
+- `--setup` - Force the one-time setup wizard even when a config already
+  exists (installs local tools, takes your RunPod API key + optional
+  Hugging Face token, picks a datacenter, creates the network volume).
+  Runs automatically on the very first launch.
+- `--rotate` - Re-paste just the RunPod API key (validated before it's
+  saved) without redoing the rest of setup. The endpoint API key and the
+  pod's SSH keypair are generated fresh every launch, so there is nothing
+  to rotate for either of them.
+- `--new` - Re-pick the model/preset and GPU interactively instead of
+  silently reusing the last session. Use this whenever you want a
+  different model, a different card, or to switch to a custom repo.
+
+### Choosing what runs (interactive, shown on first launch or `--new`)
+
+1. **Model** - pick one of the nine built-in presets, or `custom` to
+   paste any Hugging Face repo id (served with vLLM) and the served name
+   to expose it as. A custom repo has no known weight size, so the GPU
+   list isn't VRAM-filtered for it and you're prompted for the network
+   volume size yourself.
+2. **GPU** - live list of cards currently stocked in your datacenter that
+   meet the model's VRAM floor, cheapest first. If `pod create` later
+   fails because that specific host is full, you're re-offered the other
+   available cards to retry with.
+3. **Context length** - tokens (`max-model-len` / `--ctx-size`); a
+   per-model default is suggested.
+4. **Volume size** (custom repos only, network-volume mode) - offered so
+   you can grow the volume if the model needs more room than it currently
+   has. Typing `b` on any menu (or `:b` at a text prompt) steps back to
+   the previous choice.
+
+### Runtime and lifetime
+
+- `--idle-minutes N` - Minutes of zero request activity before the pod
+  auto-shuts-down (default 20). `0` disables idle shutdown, leaving only
+  the wall-clock cap below.
+- `--max-runtime-hours N` - Hard wall-clock lifetime cap regardless of
+  activity (default 4), enforced by RunPod's own `--terminate-after` as a
+  backstop even if the local idle-watchdog dies.
+- `--storage-mode MODE` - `network-volume` (default) keeps weights on a
+  billed volume across pod recreations; `container-disk` uses a bigger
+  local per-pod disk that re-downloads every launch and survives nothing.
+- `--prewarm` - Before creating the real GPU pod, download the chosen
+  preset's weights onto the network volume via a cheap CPU pod, so you
+  don't pay the GPU's hourly rate just to sit through the download.
+  Network-volume mode only. `startup.sh` also offers this automatically
+  the first time a preset touches a volume it hasn't cached on before.
+- `--extra-args "ARGS"` - Append arbitrary flags verbatim to the engine's
+  serve command (`vllm serve` or `llama-server`), for a model/quant that
+  needs a knob this script doesn't expose - e.g.
+  `--extra-args "--rope-scaling yarn --rope-scaling-factor 4"` for vLLM,
+  or `--extra-args "--split-mode row"` for llama.cpp. Applied after the
+  preset's own flags (so yours win on last-one-wins flags);
+  space-separated, so a single flag's value can't contain spaces. You own
+  their correctness - a bad flag makes the engine fail to boot, so watch
+  the pod logs.
+- `--no-logging` - Disable the engine's stats/access logging for the pod,
+  on top of each engine's own default of not logging prompt/response
+  content.
+
+### Diagnostics
+
+- `--debug` - Trace every command (`set -x`) to both the terminal and a
+  timestamped log under `~/.runpod-lab/logs`, tagged with the build
+  number. Known secrets are best-effort redacted (not guaranteed - skim
+  before sharing).
+- `--debug-quiet` - Same trace, written to the log file only; the console
+  stays clean. Use when `--debug`'s live trace makes an interactive run
+  unreadable.
+
+### `e2e-test.sh` (billed end-to-end test)
+
+Shares `--storage-mode`, `--no-logging`, `--extra-args`, `--debug`, and
+`--debug-quiet` with `startup.sh`, plus: `--preset NAME` (which built-in
+to test; defaults to the cheapest), `--prewarm-only` (cache a preset's
+weights and exit, no GPU pod), `--gpu-id ID` (pin to one card instead of
+auto-picking cheapest), `--keep` (leave the pod running), and
+`--check-idle-shutdown` (also prove the idle-watchdog self-terminates the
+pod). Without `--gpu-id` it auto-advances cheapest-first through every
+card meeting the floor if one has no capacity. See `./e2e-test.sh --help`.
 
 ## Using the endpoint
 
@@ -195,13 +290,13 @@ from OpenCode's model picker (`/models`).
 ## Testing
 
 `./e2e-test.sh` runs the full loop non-interactively against a real
-(billed) pod: picks the cheapest GPU meeting a preset's VRAM floor,
-creates the pod, waits for it to come up, checks the OpenAI endpoint
-actually serves a completion, and confirms the local idle-watchdog
-process is running - then always tears the pod down, pass or fail. See
-`./e2e-test.sh --help` for `--preset`, `--check-idle-shutdown` (also
-proves the idle-watchdog actually self-terminates the pod once it goes
-idle), and `--keep`.
+(billed) pod: picks the cheapest GPU meeting a preset's VRAM floor
+(auto-advancing to the next card if one has no capacity), creates the
+pod, waits for it to come up, checks the OpenAI endpoint actually serves
+a completion, and confirms the local idle-watchdog process is running -
+then always tears the pod down, pass or fail. Its flags are summarized
+under "Command-line flags" above; `./e2e-test.sh --help` prints them in
+full.
 
 The ephemeral SSH keypair `create_pod()` generates every launch
 (`setup_ephemeral_ssh_key()` in `lib/common.sh`) is for the

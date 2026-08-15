@@ -28,6 +28,7 @@ IDLE_MINUTES=20
 MAX_RUNTIME_HOURS=4
 STORAGE_MODE="network-volume"
 NUKE_LOGGING=0
+USER_EXTRA_ARGS=""
 DEBUG=0
 
 usage() {
@@ -63,6 +64,15 @@ Usage: $0 [--setup] [--rotate] [--new] [--prewarm] [--idle-minutes N] [--max-run
                            lib/launch.sh's PRESET_TABLE), on top of both engines' own
                            default of not logging prompt/response content. See
                            CHANGELOG.md for what this does and does not cover.
+  --extra-args "ARGS"      Extra flags appended verbatim to the engine's serve command
+                           (vllm serve, or llama-server for llamacpp presets), for a
+                           model/quant needing a knob this script doesn't expose - e.g.
+                           --extra-args "--rope-scaling yarn --rope-scaling-factor 4"
+                           for vLLM, or --extra-args "--split-mode row" for llama.cpp.
+                           Space-separated, applied after the preset's own flags (so
+                           yours win on any last-one-wins flag). An individual flag's
+                           VALUE can't contain spaces. You own their correctness - a bad
+                           flag makes the engine fail to boot; watch the pod logs.
   --debug                  Trace every command (set -x) to both the terminal and a
                            timestamped log file under ~/.runpod-lab/logs, tagged with the
                            build number. Use this if something hangs or fails with no
@@ -87,6 +97,7 @@ while (( $# > 0 )); do
     --max-runtime-hours) MAX_RUNTIME_HOURS="$2"; shift ;;
     --storage-mode) STORAGE_MODE="$2"; shift ;;
     --no-logging) NUKE_LOGGING=1 ;;
+    --extra-args) USER_EXTRA_ARGS="$2"; shift ;;
     --debug) DEBUG=1; DEBUG_MODE="both" ;;
     --debug-quiet) DEBUG=1; DEBUG_MODE="disk" ;;
     -h|--help) usage; exit 0 ;;
@@ -99,7 +110,7 @@ done
 [[ "$MAX_RUNTIME_HOURS" =~ ^[0-9]+$ ]] || die "--max-runtime-hours needs a number."
 [[ "$STORAGE_MODE" == "network-volume" || "$STORAGE_MODE" == "container-disk" ]] \
   || die "--storage-mode must be 'network-volume' or 'container-disk', got '$STORAGE_MODE'."
-export STORAGE_MODE PREWARM
+export STORAGE_MODE PREWARM USER_EXTRA_ARGS
 [[ "$DEBUG" == 1 ]] && enable_debug_logging startup "$DEBUG_MODE"
 
 if [[ ! -f "$CONFIG_FILE" || "$SETUP" == 1 ]]; then

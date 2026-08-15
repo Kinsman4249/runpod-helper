@@ -35,6 +35,7 @@ STORAGE_MODE="network-volume"
 NUKE_LOGGING=0
 DEBUG=0
 GPU_ID_OVERRIDE=""
+USER_EXTRA_ARGS=""
 
 usage() {
   cat <<EOF
@@ -70,6 +71,9 @@ Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--prewarm-only] [--i
   --no-logging              Disables the engine's stats/access logging (vLLM or
                             llama.cpp, whichever the --preset uses) - see create_pod()
                             in lib/launch.sh.
+  --extra-args "ARGS"       Extra flags appended verbatim to the engine's serve command
+                            (same as startup.sh's --extra-args) - use this to smoke-test
+                            a custom flag on a throwaway pod before a real launch.
   --gpu-id ID               Skip the "cheapest available" auto-pick and use this exact
                              GPU id (as printed by 'runpodctl gpu list', e.g. the
                              quoted display name). Use when the cheapest GPU meeting
@@ -94,6 +98,7 @@ while (( $# > 0 )); do
     --storage-mode) STORAGE_MODE="$2"; shift ;;
     --no-logging) NUKE_LOGGING=1 ;;
     --gpu-id) GPU_ID_OVERRIDE="$2"; shift ;;
+    --extra-args) USER_EXTRA_ARGS="$2"; shift ;;
     --debug) DEBUG=1; DEBUG_MODE="both" ;;
     --debug-quiet) DEBUG=1; DEBUG_MODE="disk" ;;
     -h|--help) usage; exit 0 ;;
@@ -104,7 +109,7 @@ done
 [[ "$IDLE_MINUTES" =~ ^[0-9]+$ ]] || die "--idle-minutes needs a number."
 [[ "$STORAGE_MODE" == "network-volume" || "$STORAGE_MODE" == "container-disk" ]] \
   || die "--storage-mode must be 'network-volume' or 'container-disk', got '$STORAGE_MODE'."
-export STORAGE_MODE NUKE_LOGGING
+export STORAGE_MODE NUKE_LOGGING USER_EXTRA_ARGS
 [[ "$DEBUG" == 1 ]] && enable_debug_logging e2e-test "$DEBUG_MODE"
 
 [[ -f "$CONFIG_FILE" ]] || die "No config at $CONFIG_FILE - run './startup.sh --setup' first. This script reuses that config, it doesn't create one."
@@ -165,14 +170,16 @@ fi
 log_info "Fetching live GPU availability for datacenter $DATACENTER_ID..."
 gpu_rows="$(list_available_gpus "$TEST_MIN_VRAM")" \
   || die "No GPUs meeting the ${TEST_MIN_VRAM}GB+ VRAM requirement are currently available in datacenter $DATACENTER_ID."
+# Candidate cards to try, cheapest-first. --gpu-id pins to exactly one; without
+# it, all cards meeting the floor are candidates so a capacity failure on the
+# cheapest can auto-advance to the next (create_pod returns 2 on that failure).
 if [[ -n "$GPU_ID_OVERRIDE" ]]; then
-  gpu_row="$(grep -F -m1 "$GPU_ID_OVERRIDE"$'\t' <<< "$gpu_rows")" \
+  candidate_rows="$(grep -F -m1 "$GPU_ID_OVERRIDE"$'\t' <<< "$gpu_rows")" \
     || die "--gpu-id '$GPU_ID_OVERRIDE' isn't in the list of GPUs currently meeting the ${TEST_MIN_VRAM}GB+ floor in $DATACENTER_ID. Run 'runpodctl gpu list' to check the exact id."
-  IFS=$'\t' read -r GPU_ID gpu_name gpu_vram gpu_price _stock <<< "$gpu_row"
-  log_info "GPU: $gpu_name (${gpu_vram}GB, \$${gpu_price}/hr) - manually selected via --gpu-id."
+  log_info "GPU: manually pinned via --gpu-id to '$GPU_ID_OVERRIDE'."
 else
-  IFS=$'\t' read -r GPU_ID gpu_name gpu_vram gpu_price _stock <<< "$(head -n1 <<< "$gpu_rows")"
-  log_info "GPU: $gpu_name (${gpu_vram}GB, \$${gpu_price}/hr) - cheapest available meeting the floor."
+  candidate_rows="$gpu_rows"
+  log_info "GPUs meeting the ${TEST_MIN_VRAM}GB+ floor will be tried cheapest-first until one has capacity."
 fi
 
 # --- launch -------------------------------------------------------------
@@ -215,9 +222,22 @@ trap cleanup EXIT
 # README's storage rate table, to see which is actually cheaper for your
 # own launch frequency - deliberately not modeled further here since that
 # depends on usage pattern (how often you launch, how long sessions run).
-launch_started="$(date +%s)"
-create_pod
-POD_CREATED=1
+# Try each candidate card until one deploys. create_pod returns 2 on a
+# retryable capacity failure (host full despite the card showing stock) and
+# dies on anything else. launch_started is (re)set per attempt so the timing
+# below reflects the card that actually launched, not time burnt on full ones.
+create_ok=0
+while IFS=$'\t' read -r GPU_ID gpu_name gpu_vram gpu_price _stock; do
+  [[ -z "$GPU_ID" ]] && continue
+  log_info "Trying GPU: $gpu_name (${gpu_vram}GB, \$${gpu_price}/hr)..."
+  launch_started="$(date +%s)"
+  rc=0; create_pod || rc=$?
+  if (( rc == 0 )); then create_ok=1; POD_CREATED=1; break; fi
+  (( rc == 2 )) || die "Pod creation failed (rc=$rc) - see above."
+  log_warn "$gpu_name has no free capacity right now - trying the next available card..."
+done <<< "$candidate_rows"
+(( create_ok == 1 )) \
+  || die "Every available GPU meeting the ${TEST_MIN_VRAM}GB+ floor failed with a capacity error. Try again shortly, or check https://www.runpod.io/console/gpu-cloud."
 wait_for_pod_ready
 # || true: wait_for_vllm_ready now returns 1 on timeout (added in
 # lib/launch.sh for run_normal_launch's mark_prewarmed gating) - under set -e
