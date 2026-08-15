@@ -2,11 +2,11 @@
 # except during the first-run setup wizard. Sourced by startup.sh.
 
 CONTAINER_DISK_GB=40   # holds the vLLM image + OS only; weights live on the
-                       # network volume (HF_HOME, see image/entrypoint.sh).
-                       # vllm/vllm-openai is a much heavier base image than
-                       # the old llama.cpp one (full CUDA/PyTorch/vLLM
-                       # stack) - not yet measured against a real pull, bump
-                       # this if it turns out too small.
+                       # network volume (HF_HOME, set via --env in
+                       # create_pod() below). vllm/vllm-openai is a heavy
+                       # base image (full CUDA/PyTorch/vLLM stack) - not yet
+                       # measured against a real pull, bump this if it
+                       # turns out too small.
 
 # Used instead of CONTAINER_DISK_GB when STORAGE_MODE=container-disk: no
 # network volume is attached, so this disk has to hold the image/OS AND the
@@ -32,9 +32,21 @@ CONTAINER_DISK_GB_STANDALONE=150
 # calling run_normal_launch/create_pod; defaults here only as a safety net.
 STORAGE_MODE="${STORAGE_MODE:-network-volume}"
 
-# Built by ../image/Dockerfile, published by
-# ../.github/workflows/build-image.yml on every push to image/**.
-IMAGE_NAME="ghcr.io/kinsman4249/runpod-helper-image:latest"
+# vLLM's own official image - no custom Dockerfile/entrypoint (removed
+# 2026-08-14; see CHANGELOG.md). Pinning to a digest instead of "latest"
+# would be more reproducible, but "latest" is what every live diagnosis
+# this session was run against and is what confirmed the --ports/VRAM
+# findings below - not changing that out from under itself right now.
+IMAGE_NAME="vllm/vllm-openai:latest"
+
+# llama.cpp's own official server image, added 2026-08-14 for the
+# qwen3.5-40b-deckard-gguf preset below. Verified live against a throwaway
+# pod: it auto-downloads a GGUF straight from Hugging Face via --hf-repo
+# (no custom entrypoint/prewarm needed, mirroring how the vLLM image
+# already just takes --model), caches it under $LLAMA_CACHE, and serves an
+# OpenAI-compatible API - confirmed both /v1/models and /v1/chat/completions
+# work through RunPod's proxy on port 8000, same as vLLM.
+LLAMACPP_IMAGE_NAME="ghcr.io/ggml-org/llama.cpp:server-cuda"
 
 # --- model presets -----------------------------------------------------------
 # Every repo below was confirmed to exist via the HF API
@@ -42,21 +54,46 @@ IMAGE_NAME="ghcr.io/kinsman4249/runpod-helper-image:latest"
 # for the AWQ presets is auto-detected by vLLM from each repo's own
 # config.json ("auto" here is literally passed as --quantization auto,
 # vLLM's own default - not a magic value, just makes the flag unconditional
-# for every preset including the on-the-fly ones below). min_vram is a floor
+# for every preset including the on-the-fly ones below), EXCEPT
+# qwen3.6-27b-awq-mtp below: that repo's config.json declares
+# quantization_method "awq" explicitly, and vLLM 0.27.1 rejects
+# --quantization auto against a repo that already states a method
+# (pydantic ValidationError, confirmed live 2026-08-14 boot-looping the
+# pod) - so that preset pins "awq" instead of "auto". min_vram is a floor
 # (the GPU list is still filtered live against it, same as the old preset
 # system), not a recommendation - a bigger card than the floor buys more
 # KV-cache headroom and lets you push max-model-len higher than the
 # suggested default below. Weight sizes are approximate (param count x
 # ~4-8 bits/byte + overhead).
 #
-# Columns: value | HF repo | served-model-name | min_vram_gb | default max-model-len | quantization | label
+# Columns: value | engine | HF repo | served-model-name | min_vram_gb | default max-model-len | quantization | extra serve flags (space-separated, "-" for none) | label
+#
+# engine is "vllm" or "llamacpp" (added 2026-08-14 alongside the first
+# llamacpp preset below) - selects IMAGE_NAME vs LLAMACPP_IMAGE_NAME and the
+# whole docker-args/env shape in create_pod(). For llamacpp rows, "HF repo"
+# is actually "<repo>:<quant tag>" (llama-server's own --hf-repo syntax -
+# the quant is picked by tag, not a separate flag), so the quantization
+# column is unused ("-") for those rows.
+#
+# extra_args exists because of a live-confirmed failure mode (2026-08-14):
+# hybrid Gated-DeltaNet/full-attention models (Qwen3.5/3.6's architecture)
+# need extra FIXED memory for recurrent/mamba state on top of normal KV
+# cache. vLLM's default --gpu-memory-utilization 0.9 left only 0.39GiB free
+# after AWQ weights on a 24GB L4, crashing _initialize_kv_caches. Fixed by
+# --gpu-memory-utilization 0.95 --kv-cache-dtype fp8. --enforce-eager added
+# defensively (ruled out, not confirmed needed) against two known unfixed
+# vLLM bugs on this architecture (github.com/vllm-project/vllm issues
+# #40807, #40880) that involve CUDA-graph capture. Plain (non-hybrid) dense
+# presets need none of this, hence "-".
 PRESET_TABLE='
-deepseek-r1-distill-32b|casperhansen/deepseek-r1-distill-qwen-32b-awq|deepseek-r1-32b|24|16384|auto|DeepSeek-R1-Distill-Qwen-32B (AWQ, ~19GB) - dense reasoning model
-qwen3-32b|Qwen/Qwen3-32B-AWQ|qwen3-32b|24|16384|auto|Qwen3-32B (AWQ, ~19GB) - dense general-purpose
-qwen3-coder-30b-moe|stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ|qwen3-coder-30b|24|32768|auto|Qwen3-Coder-30B-A3B (AWQ, MoE ~3B active, ~17GB) - the Qwen Code MoE you asked for
-qwen2.5-72b|Qwen/Qwen2.5-72B-Instruct-AWQ|qwen2.5-72b|48|8192|auto|Qwen2.5-72B-Instruct (AWQ, ~41GB) - bigger dense option
-llama3.3-70b|casperhansen/llama-3.3-70b-instruct-awq|llama3.3-70b|48|8192|auto|Llama-3.3-70B-Instruct (AWQ, ~39GB) - non-Qwen/DeepSeek alternative in range
-qwen3.5-40b-deckard|DavidAU/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking|qwen3.5-40b-deckard|48|8192|fp8|Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking (bf16 repo, on-the-fly FP8, ~40GB) - uncensored, tuned for tool use
+deepseek-r1-distill-32b|vllm|casperhansen/deepseek-r1-distill-qwen-32b-awq|deepseek-r1-32b|24|16384|auto|-|DeepSeek-R1-Distill-Qwen-32B (AWQ, ~19GB) - dense reasoning model
+qwen3-32b|vllm|Qwen/Qwen3-32B-AWQ|qwen3-32b|24|16384|auto|-|Qwen3-32B (AWQ, ~19GB) - dense general-purpose
+qwen3-coder-30b-moe|vllm|stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ|qwen3-coder-30b|24|32768|auto|-|Qwen3-Coder-30B-A3B (AWQ, MoE ~3B active, ~17GB) - the Qwen Code MoE you asked for
+qwen2.5-72b|vllm|Qwen/Qwen2.5-72B-Instruct-AWQ|qwen2.5-72b|48|8192|auto|-|Qwen2.5-72B-Instruct (AWQ, ~41GB) - bigger dense option
+llama3.3-70b|vllm|casperhansen/llama-3.3-70b-instruct-awq|llama3.3-70b|48|8192|auto|-|Llama-3.3-70B-Instruct (AWQ, ~39GB) - non-Qwen/DeepSeek alternative in range
+qwen3.5-40b-deckard|vllm|DavidAU/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking|qwen3.5-40b-deckard|80|262144|fp8|--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager|Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking (hybrid Gated DeltaNet/full-attention, bf16 repo, on-the-fly FP8 ~40GB weights, 256K context, needs an 80GB+ card - see CHANGELOG.md) - uncensored, tuned for tool use
+qwen3.6-27b-awq-mtp|vllm|shawnw3i/Qwen3.6-27B-AWQ-MTP|qwen3.6-27b|24|16384|awq|--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager|Qwen3.6-27B-AWQ-MTP (hybrid Gated DeltaNet/full-attention, AWQ ~18GB weights, verified live 2026-08-14 on a 24GB L4) - agentic coding, MTP speculative decode support
+qwen3.5-40b-deckard-gguf|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|48|262144|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0|Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking on llama.cpp (static GGUF, Q5_K_S ~27GB - the model cards own stated minimum for reliable tool calls, see mradermacher/...-GGUF; Q4 is smaller but the card explicitly warns against it for agentic/tool-call use), 256K context - min_vram is a first guess (hybrid arch needs far less KV cache than the dense vLLM path above at the same context, not yet measured live), bump if it OOMs
 '
 
 # --- GPU listing --------------------------------------------------------
@@ -98,25 +135,30 @@ pick_preset_and_gpu() {
     # shellcheck source=/dev/null
     source "$LAST_SESSION_FILE"
     [[ -n "${MODEL_REPO:-}" && -n "${GPU_ID:-}" && -n "${SERVED_MODEL_NAME:-}" && -n "${MAX_MODEL_LEN:-}" ]] && {
-      # Backward compat: sessions saved before the quantization column
-      # existed have no MODEL_QUANTIZATION at all - "auto" is what every
-      # preset from that era actually ran with (vLLM's own default).
+      # Backward compat: sessions saved before the quantization/extra-args/
+      # engine columns existed have none of those vars at all - "auto"/"-"/
+      # "vllm" is what every preset from that era actually ran with (vLLM's
+      # own default, no extra flags, and the only engine that existed yet).
       MODEL_QUANTIZATION="${MODEL_QUANTIZATION:-auto}"
+      MODEL_EXTRA_ARGS="${MODEL_EXTRA_ARGS:--}"
+      ENGINE="${ENGINE:-vllm}"
       log_info "Reusing last session: model=$MODEL_REPO gpu=$GPU_ID max-model-len=$MAX_MODEL_LEN (pass --new to change)."
       return
     }
   fi
 
-  local -a preset_values=() preset_repos=() preset_served_names=() preset_min_vram=() preset_default_ctx=() preset_quants=() preset_labels=()
-  local line value repo served min_vram default_ctx quant label
-  while IFS='|' read -r value repo served min_vram default_ctx quant label; do
+  local -a preset_values=() preset_engines=() preset_repos=() preset_served_names=() preset_min_vram=() preset_default_ctx=() preset_quants=() preset_extra_args=() preset_labels=()
+  local line value engine repo served min_vram default_ctx quant extra_args label
+  while IFS='|' read -r value engine repo served min_vram default_ctx quant extra_args label; do
     [[ -z "$value" ]] && continue
     preset_values+=("$value")
+    preset_engines+=("$engine")
     preset_repos+=("$repo")
     preset_served_names+=("$served")
     preset_min_vram+=("$min_vram")
     preset_default_ctx+=("$default_ctx")
     preset_quants+=("$quant")
+    preset_extra_args+=("$extra_args")
     preset_labels+=("$label")
   done <<< "$PRESET_TABLE"
   preset_values+=("custom")
@@ -129,6 +171,7 @@ pick_preset_and_gpu() {
   local step="preset" preset_choice gpu_choice
   local min_vram=0 default_ctx=16384
   MODEL_QUANTIZATION="auto"
+  MODEL_EXTRA_ARGS="-"
   while true; do
     case "$step" in
       preset)
@@ -139,11 +182,13 @@ pick_preset_and_gpu() {
         if [[ "$MODEL_PRESET" == "custom" ]]; then
           step="custom_repo"
         else
+          ENGINE="${preset_engines[$((preset_choice - 1))]}"
           MODEL_REPO="${preset_repos[$((preset_choice - 1))]}"
           SERVED_MODEL_NAME="${preset_served_names[$((preset_choice - 1))]}"
           min_vram="${preset_min_vram[$((preset_choice - 1))]}"
           default_ctx="${preset_default_ctx[$((preset_choice - 1))]}"
           MODEL_QUANTIZATION="${preset_quants[$((preset_choice - 1))]}"
+          MODEL_EXTRA_ARGS="${preset_extra_args[$((preset_choice - 1))]}"
           step="gpu"
         fi
         ;;
@@ -157,7 +202,9 @@ pick_preset_and_gpu() {
         [[ -n "$SERVED_MODEL_NAME" ]] || die "No served-model-name entered."
         min_vram=0   # unknown model size - show every GPU, you check VRAM fit yourself.
         default_ctx=8192
+        ENGINE="vllm"   # custom repos are vLLM-only for now - llama.cpp needs a repo:quant tag, not a bare HF repo id.
         MODEL_QUANTIZATION="auto"   # vLLM auto-detects from the repo's own config.json, same as the built-in AWQ presets.
+        MODEL_EXTRA_ARGS="-"   # unknown architecture - if it's a hybrid Gated-DeltaNet model, you may need to add --gpu-memory-utilization/--kv-cache-dtype yourself; see PRESET_TABLE's comment above.
         log_warn "Custom repo: this script doesn't know its weight size, so the GPU list below isn't filtered by VRAM and the network-volume-size prompt after GPU selection isn't pre-sized either - check the model card yourself before picking."
         step="gpu"
         ;;
@@ -212,8 +259,8 @@ pick_preset_and_gpu() {
 
   mkdir -p "$CONFIG_DIR"
   ( umask 077
-    printf 'MODEL_PRESET=%q\nMODEL_REPO=%q\nSERVED_MODEL_NAME=%q\nGPU_ID=%q\nMAX_MODEL_LEN=%q\nMODEL_QUANTIZATION=%q\n' \
-      "$MODEL_PRESET" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$GPU_ID" "$MAX_MODEL_LEN" "$MODEL_QUANTIZATION" > "$LAST_SESSION_FILE"
+    printf 'MODEL_PRESET=%q\nENGINE=%q\nMODEL_REPO=%q\nSERVED_MODEL_NAME=%q\nGPU_ID=%q\nMAX_MODEL_LEN=%q\nMODEL_QUANTIZATION=%q\nMODEL_EXTRA_ARGS=%q\n' \
+      "$MODEL_PRESET" "$ENGINE" "$MODEL_REPO" "$SERVED_MODEL_NAME" "$GPU_ID" "$MAX_MODEL_LEN" "$MODEL_QUANTIZATION" "$MODEL_EXTRA_ARGS" > "$LAST_SESSION_FILE"
   )
 }
 
@@ -287,158 +334,114 @@ ensure_volume_size_at_least() {
   log_ok "Volume $NETWORK_VOLUME_ID grown to ${wanted_gb}GB."
 }
 
-# --- prewarm: model download on a cheap CPU pod -----------------------------
-
-# CPU pods are billed at a small fraction of GPU rates (RunPod pricing, not
-# independently re-quoted here - check https://www.runpod.io/console/gpu-cloud
-# for current CPU pod rates). Downloading multi-GB model weights here instead
-# of on the GPU pod means you're not paying GPU-hour rates for pure
-# network-bound work. Both pods mount the same network volume at the same
-# path (/workspace/persistent), so anything written here is immediately
-# visible to the GPU pod that launches after it.
-maybe_run_prewarm() {
-  if [[ "${FORCE_PREWARM:-0}" != 1 && "${PREWARMED_MODEL_REPO:-}" == "$MODEL_REPO" && "${PREWARMED_VOLUME_ID:-}" == "$NETWORK_VOLUME_ID" ]]; then
-    log_info "Volume already prewarmed for $MODEL_REPO - skipping. Pass --prewarm to force a re-run."
-    return
-  fi
-
-  log_info ""
-  log_info "Prewarming network volume: downloading $MODEL_REPO weights on a cheap CPU pod..."
-
-  # RUNPOD_API_KEY is needed so entrypoint.sh's PREWARM_ONLY branch can
-  # self-terminate this pod via runpodctl once it's done - see the big
-  # comment on the wait loop below for why that's not optional.
-  local env_json create_output prewarm_pod_id
-  env_json=$(printf '{"PREWARM_ONLY":"1","MODEL_REPO":"%s","RUNPOD_API_KEY":"%s"}' "$MODEL_REPO" "$RUNPOD_API_KEY")
-
-  # --compute-type confirmed against a live `runpodctl pod create` call
-  # (2026-07-31, pod id 4xfim5k1etd6xs) - CPU pods take no --gpu-id, and
-  # there's no --vcpu/--mem flag at all (unlike the deprecated top-level
-  # `runpodctl create pod` alias, which has different, camelCase flag names -
-  # don't confuse the two). Defaults to 2 vcpu/4GB mem, $0.06/hr in EUR-IS-1.
-  create_output="$(runpodctl_t pod create \
-    --compute-type CPU \
-    --image "$IMAGE_NAME" \
-    --network-volume-id "$NETWORK_VOLUME_ID" \
-    --volume-mount-path /workspace/persistent \
-    --container-disk-in-gb 10 \
-    --name "runpod-lab-prewarm-$(date +%s)" \
-    --env "$env_json")" || die "Prewarm pod creation failed. Raw output:\n$create_output"
-
-  prewarm_pod_id="$(jq -r '.id // empty' <<< "$create_output")"
-  [[ -n "$prewarm_pod_id" ]] || die "Prewarm pod created but no id found in the response: $create_output"
-  log_ok "Prewarm pod created: $prewarm_pod_id"
-
-  # A stuck prewarm pod is still real money (if not much) - clean it up on
-  # every exit path out of this function, not just the happy one.
-  # `|| true` on both: the pod usually self-terminates already (see below),
-  # so these normally fail (pod not found) - under `set -e`, a failing
-  # command inside a RETURN trap was observed live (2026-08-01) to make the
-  # whole script exit non-zero despite everything actually succeeding.
-  trap 'runpodctl_t pod stop "'"$prewarm_pod_id"'" >/dev/null 2>&1 || true; runpodctl_t pod delete "'"$prewarm_pod_id"'" >/dev/null 2>&1 || true' RETURN
-
-  # Confirmed live (2026-08-01): RunPod restarts a pod's container on ANY
-  # exit, including a clean `exit 0` - polling for status to merely leave
-  # "running" never works, since a pod that just finishes and exits gets
-  # immediately relaunched by RunPod itself and looks "running" forever.
-  # entrypoint.sh's PREWARM_ONLY branch self-terminates via runpodctl once
-  # it's done (needs $RUNPOD_API_KEY, passed above), so completion here
-  # means the `pod get` call itself starts erroring (pod no longer exists) -
-  # that's the real signal, not the status text. The still-running check
-  # stays as a secondary signal in case self-termination didn't fire.
-  #
-  # BUT: "pod get errors / not running" also happens if the pod never
-  # actually started (image pull failure, capacity/scheduling problem) and
-  # RunPod cleans it up on its own - confirmed live 2026-08-01, a prewarm
-  # pod vanished (404 on `pod get`) within ~20-30s, and this loop reported
-  # "Prewarm finished" even though the volume had nothing on it at all.
-  # A multi-GB model download cannot genuinely finish that fast, so
-  # MIN_PREWARM_SECONDS below is a floor: disappearing before it elapses is
-  # treated as a failure, not success, same as the max_wait timeout branch
-  # already does.
-  #
-  # The completion check itself also used to grep the raw JSON for the
-  # substring '"error"' - wrong, because `pod get`'s response nests
-  # {"ssh": {"error": "pod not ready", ...}} for as long as SSH isn't up
-  # yet, completely unrelated to whether the pod itself is fine. Checking
-  # for the absence of `.desiredStatus` (only present on a real pod object)
-  # is the precise signal instead. min_wait alone is NOT proof of a real
-  # finish either (confirmed live twice, 2026-08-01 and 2026-08-03, that a
-  # pod stuck at uptimeSeconds=0 the whole time can still sit around past
-  # min_wait before vanishing) - track whether uptimeSeconds was EVER
-  # observed > 0 and require it before trusting min_wait.
-  log_info "Waiting for prewarm to finish (model download can take a while on first run)..."
-  local waited=0 max_wait=3600 min_wait=60 get_output pod_status uptime saw_real_uptime=0
-  while (( waited < max_wait )); do
-    # `|| true`: runpodctl exits non-zero once the pod is gone (404), and
-    # under `set -e` a failing command substitution assignment kills the
-    # whole script right here - before the jq check below, which is the
-    # code that's actually supposed to handle a gone pod, ever runs.
-    get_output="$(runpodctl_t pod get "$prewarm_pod_id" 2>&1)" || true
-    if ! pod_status="$(jq -e -r '.desiredStatus' <<< "$get_output" 2>/dev/null)"; then
-      break  # response is a bare error object (no pod fields at all) - genuinely gone.
-    fi
-    uptime="$(jq -r '.uptimeSeconds // 0' <<< "$get_output" 2>/dev/null)"
-    [[ "${uptime:-0}" =~ ^[0-9]+$ && "$uptime" -gt 0 ]] && saw_real_uptime=1
-    [[ "$pod_status" != "RUNNING" ]] && break  # stopped/exited but not yet deleted.
-    sleep 15; waited=$((waited + 15))
-  done
-
-  if (( waited >= max_wait )); then
-    log_warn "Prewarm pod still reports running after ${max_wait}s - stopping it now regardless. Model download may be incomplete; the GPU pod will finish the job itself if so, or rerun with --prewarm later."
-    return
-  fi
-
-  if (( waited < min_wait )); then
-    log_warn "Prewarm pod disappeared after only ${waited}s - too fast to be a genuine finish (a multi-GB download takes much longer). Likely a scheduling/image-pull failure, not success. Not marking this volume as prewarmed; the GPU pod will do the download itself, or rerun with --prewarm after checking the console."
-    return
-  fi
-
-  if (( saw_real_uptime == 0 )); then
-    log_warn "Prewarm pod never reported uptimeSeconds > 0 in ${waited}s before disappearing - it never actually booted far enough to run entrypoint.sh (RunPod-side flakiness, e.g. stuck ssh.error/'pod not ready'), so nothing was downloaded. Not marking this volume as prewarmed; rerun with --prewarm once RunPod is stable."
-    return
-  fi
-
-  log_ok "Prewarm finished."
-  sed -i '/^PREWARMED_VOLUME_ID=/d;/^PREWARMED_MODEL_REPO=/d' "$CONFIG_FILE"
-  printf 'PREWARMED_VOLUME_ID=%q\nPREWARMED_MODEL_REPO=%q\n' "$NETWORK_VOLUME_ID" "$MODEL_REPO" >> "$CONFIG_FILE"
-}
-
 # --- pod creation ------------------------------------------------------------
 
 create_pod() {
   local terminate_after
   # --terminate-after is a confirmed native runpodctl flag (absolute
-  # ISO-8601 datetime) - a hard backstop that fires even if idle-watchdog.sh
-  # itself has crashed or its request-activity detection is misbehaving.
+  # ISO-8601 datetime) - a hard backstop that fires even if the local
+  # idle-watchdog (see maybe_start_idle_watchdog() below) itself has
+  # crashed or its request-activity detection is misbehaving.
   terminate_after="$(date -u -d "+${MAX_RUNTIME_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)"
 
-  # One-off keypair (registered with RunPod, baked into this pod's
-  # authorized_keys at boot) and one-off vLLM bearer token, both generated
-  # fresh right here instead of reused from setup - see
-  # setup_ephemeral_ssh_key() in lib/common.sh. Must run before the
-  # `pod create` call below: RunPod only bakes keys that are ALREADY
-  # registered to the account into a new pod's authorized_keys at boot.
+  # Registered with RunPod so resolve_pod_ssh_proxy_host() (lib/common.sh)
+  # can diagnose this pod later via ssh.runpod.io - the bare image has no
+  # sshd, so this key never gets baked into an authorized_keys file
+  # anywhere; it's only good for RunPod's own proxy-side exec.
   setup_ephemeral_ssh_key
   VLLM_API_KEY="$(openssl rand -hex 32)"
 
   log_info ""
-  log_info "Creating pod (GPU $GPU_ID, model $MODEL_REPO, auto-terminate at $terminate_after UTC)..."
+  log_info "Creating pod (GPU $GPU_ID, engine ${ENGINE:-vllm}, model $MODEL_REPO, auto-terminate at $terminate_after UTC)..."
 
-  # --env deliberately carries ONLY these seven names - no GitHub
-  # credential, no git identity, no Cloudflare token: this pod only serves
-  # inference, reached directly over its own 22/tcp and RunPod's own HTTP
-  # proxy (see wait_for_pod_ready()/run_normal_launch() below), nothing on
-  # it edits or commits code anymore.
-  local env_json
-  env_json=$(printf '{"MODEL_REPO":"%s","SERVED_MODEL_NAME":"%s","MAX_MODEL_LEN":"%s","QUANTIZATION":"%s","VLLM_API_KEY":"%s","IDLE_MINUTES":"%s","RUNPOD_API_KEY":"%s","DISABLE_LOGGING":"%s"}' \
-    "$MODEL_REPO" "$SERVED_MODEL_NAME" "$MAX_MODEL_LEN" "${MODEL_QUANTIZATION:-auto}" "$VLLM_API_KEY" "$IDLE_MINUTES" "$RUNPOD_API_KEY" "${NUKE_LOGGING:-0}")
+  # Both the vllm/vllm-openai and ggml-org/llama.cpp images have a fixed
+  # ENTRYPOINT (["vllm","serve"] / ["/app/llama-server"] respectively) - no
+  # custom entrypoint.sh anymore (removed 2026-08-14; see CHANGELOG.md), so
+  # every model/runtime setting has to arrive as a CLI arg appended via
+  # --docker-args, not an --env var some wrapper script used to translate.
+  # This also means: no sshd (nothing starts it), no on-pod idle-watchdog
+  # (nothing to host it - see maybe_start_idle_watchdog()), and no reason
+  # to put RUNPOD_API_KEY on the pod at all anymore, since nothing running
+  # on it needs to call the RunPod API to self-terminate.
+  local -a log_flags=()
+  if [[ "${NUKE_LOGGING:-0}" == 1 ]]; then
+    if [[ "${ENGINE:-vllm}" == "llamacpp" ]]; then
+      log_flags=(--log-disable)
+    else
+      log_flags=(--disable-log-stats --disable-uvicorn-access-log)
+    fi
+  fi
+
+  local -a extra_flags=()
+  [[ -n "${MODEL_EXTRA_ARGS:-}" && "$MODEL_EXTRA_ARGS" != "-" ]] && read -ra extra_flags <<< "$MODEL_EXTRA_ARGS"
+
+  local docker_args env_json
+  if [[ "${ENGINE:-vllm}" == "llamacpp" ]]; then
+    # --hf-repo takes MODEL_REPO's own "<repo>:<quant tag>" form directly
+    # (llama-server's own syntax, confirmed live 2026-08-14 against
+    # ggml-org/gemma-4-E2B-it-GGUF:Q8_0 through RunPod's proxy) - no
+    # separate --quantization flag the way vLLM has one. --alias sets the
+    # clean served name (otherwise /v1/models would list the full
+    # repo:quant string, which e2e-test.sh's checks and any client
+    # wouldn't know to ask for). --metrics is required for
+    # idle-watchdog.sh's activity polling below, not optional here.
+    # -ngl 999 offloads every layer to GPU - llama.cpp's own convention for
+    # "as many as exist", not a real layer count.
+    docker_args="$(printf '%q ' \
+      --hf-repo "$MODEL_REPO" \
+      --alias "$SERVED_MODEL_NAME" \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --ctx-size "$MAX_MODEL_LEN" \
+      --api-key "$VLLM_API_KEY" \
+      --n-gpu-layers 999 \
+      --metrics \
+      "${extra_flags[@]}" \
+      "${log_flags[@]}")"
+
+    # LLAMA_CACHE on the network volume (when attached): the downloaded
+    # GGUF persists across pod recreations, mirroring HF_HOME's role for
+    # vLLM below. STORAGE_MODE=container-disk has no volume mounted, so
+    # LLAMA_CACHE is left at llama.cpp's own default (the pod's own
+    # container disk).
+    if [[ "$STORAGE_MODE" == "network-volume" ]]; then
+      env_json=$(jq -n --arg cache "/workspace/persistent/llama-cache" --arg hftoken "${HF_TOKEN:-}" \
+        '{LLAMA_CACHE:$cache} + (if $hftoken != "" then {HF_TOKEN:$hftoken} else {} end)')
+    else
+      env_json=$(jq -n --arg hftoken "${HF_TOKEN:-}" \
+        '{} + (if $hftoken != "" then {HF_TOKEN:$hftoken} else {} end)')
+    fi
+  else
+    docker_args="$(printf '%q ' \
+      --model "$MODEL_REPO" \
+      --served-model-name "$SERVED_MODEL_NAME" \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --max-model-len "$MAX_MODEL_LEN" \
+      --quantization "${MODEL_QUANTIZATION:-auto}" \
+      --api-key "$VLLM_API_KEY" \
+      "${extra_flags[@]}" \
+      "${log_flags[@]}")"
+
+    # HF_HOME on the network volume (when attached): weights persist across
+    # pod recreations, so a second launch of the same model preset skips the
+    # multi-GB download entirely instead of re-fetching it every time.
+    # STORAGE_MODE=container-disk has no volume mounted, so HF_HOME is left
+    # at vLLM's own default (the pod's own container disk - see
+    # CONTAINER_DISK_GB_STANDALONE above for why that disk is sized bigger).
+    if [[ "$STORAGE_MODE" == "network-volume" ]]; then
+      env_json=$(jq -n --arg hfhome "/workspace/persistent/hf-cache" --arg hftoken "${HF_TOKEN:-}" \
+        '{HF_HOME:$hfhome} + (if $hftoken != "" then {HF_TOKEN:$hftoken} else {} end)')
+    else
+      env_json=$(jq -n --arg hftoken "${HF_TOKEN:-}" \
+        '{} + (if $hftoken != "" then {HF_TOKEN:$hftoken} else {} end)')
+    fi
+  fi
 
   # STORAGE_MODE=container-disk omits --network-volume-id/--volume-mount-path
-  # entirely - with nothing mounted at /workspace/persistent, entrypoint.sh's
-  # `mkdir -p "$PERSIST_DIR/..."` calls just create plain directories on the
-  # pod's own (bigger) container disk instead, no entrypoint.sh change
-  # needed. See CONTAINER_DISK_GB_STANDALONE above for the sizing rationale.
+  # entirely - nothing mounts at /workspace/persistent, so HF_HOME above
+  # falls back to the pod's own (bigger) container disk instead. See
+  # CONTAINER_DISK_GB_STANDALONE above for the sizing rationale.
   local -a storage_args
   if [[ "$STORAGE_MODE" == "container-disk" ]]; then
     storage_args=(--container-disk-in-gb "$CONTAINER_DISK_GB_STANDALONE")
@@ -450,28 +453,38 @@ create_pod() {
     )
   fi
 
+  local image_name="$IMAGE_NAME"
+  [[ "${ENGINE:-vllm}" == "llamacpp" ]] && image_name="$LLAMACPP_IMAGE_NAME"
+
   local create_output
   create_output="$(runpodctl_t pod create \
     --cloud-type SECURE \
     --gpu-id "$GPU_ID" \
-    --image "$IMAGE_NAME" \
+    --image "$image_name" \
     "${storage_args[@]}" \
     --terminate-after "$terminate_after" \
     --name "runpod-lab-$(date +%s)" \
-    --env "$env_json")" || die "Pod creation failed. Raw output:\n$create_output"
+    --ports "8000/http" \
+    --env "$env_json" \
+    --docker-args "$docker_args")" || die "Pod creation failed. Raw output:\n$create_output"
 
   # Picking specific fields (rather than printing $create_output raw) is
-  # deliberate: the response's "env" array echoes back RUNPOD_API_KEY and
-  # VLLM_API_KEY in plaintext, which has no business hitting the terminal
-  # or a captured log.
+  # deliberate: the response echoes back both the --env payload and the
+  # --docker-args string verbatim, including VLLM_API_KEY (now inside
+  # docker-args, not env) and HF_TOKEN if set - none of that has any
+  # business hitting the terminal or a captured log.
   POD_ID="$(jq -r '.id // empty' <<< "$create_output")"
   [[ -n "$POD_ID" ]] || die "Pod created but no id found in the response: $create_output"
 
-  # RunPod auto-exposes any HTTP port a pod's process listens on at this
-  # URL, no config needed (confirmed live 2026-08-14: curling
-  # https://<pod-id>-8000.proxy.runpod.net/v1/models against a plain
-  # vllm-openai pod worked immediately, 401 without the bearer token, 200
-  # with it) - this is what used to need a whole Cloudflare Tunnel setup.
+  # RunPod's proxy does NOT auto-detect a listening port - `pod create`
+  # needs an explicit --ports flag (see runpodctl's own --help) or every
+  # request to <pod-id>-8000.proxy.runpod.net 404s forever even once vLLM
+  # is healthy on 8000 inside the container. Confirmed live 2026-08-14 on a
+  # bare vllm-openai pod: omitting --ports gave a permanent 404 through 10+
+  # minutes of a healthy internal /health; adding --ports "8000/http" made
+  # the same proxy URL start returning 502 (booting) then 200 (ready)
+  # within the same launch. This is what used to need a whole Cloudflare
+  # Tunnel setup.
   API_HOSTNAME="$POD_ID-8000.proxy.runpod.net"
 
   log_ok "Pod created:"
@@ -493,46 +506,52 @@ wait_for_pod_ready() {
   (( waited < max_wait )) || die "Pod didn't report running within ${max_wait}s. Check the console."
   log_ok "Pod reports running."
 
-  # Pod status alone doesn't mean sshd is up yet inside it - actually
-  # reaching it over its own direct 22/tcp (resolve_pod_ssh_endpoint(),
-  # lib/common.sh) is the real readiness signal, not just the API's status
-  # field. Also sets SSH_HOST/SSH_PORT for anything later that needs to ssh
-  # in (diagnostics, the final launch summary).
-  log_info "Resolving the pod's direct SSH endpoint..."
-  resolve_pod_ssh_endpoint || die "Pod is running but never got a direct SSH endpoint - check the console."
-
-  log_info "Waiting for SSH to come up..."
-  waited=0
-  while (( waited < max_wait )); do
-    if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
-         -i "$SSH_KEY_PATH" -p "$SSH_PORT" "root@$SSH_HOST" true 2>/dev/null; then
-      log_ok "SSH reachable."
-      return
-    fi
-    sleep 10; waited=$((waited + 10))
-  done
-  die "SSH never came up within ${max_wait}s. Pod is running but entrypoint.sh may have failed - check the console."
+  # Pod status alone says nothing about whether vllm serve is actually up
+  # yet (still pulling the image, or still loading a large model into
+  # VRAM) - wait_for_vllm_ready() below, polling the real HTTP endpoint, is
+  # the actual readiness gate. No SSH check here: the bare vllm/vllm-openai
+  # image never starts an sshd (see resolve_pod_ssh_proxy_host(),
+  # lib/common.sh, for the diagnostics-only proxy alternative), so there is
+  # nothing to poll on port 22 anymore.
 }
 
-# SSH being up only means entrypoint.sh started - it says nothing about
-# whether vLLM has finished loading a (potentially tens-of-GB) model into
-# VRAM yet. Poll the actual public endpoint (RunPod's own per-pod proxy
-# URL, the same path a real client uses) so "Pod ready" means the API
-# genuinely works, not just that the container booted.
+# Pod status alone says nothing about whether vllm serve has finished
+# loading a (potentially tens-of-GB) model into VRAM yet. Poll the actual
+# public endpoint (RunPod's own per-pod proxy URL, the same path a real
+# client uses) so "Pod ready" means the API genuinely works, not just that
+# the container booted.
 wait_for_vllm_ready() {
   log_info ""
-  log_info "Waiting for the vLLM endpoint to finish loading $MODEL_REPO (this can take several minutes for a large model)..."
+  log_info "Waiting for the ${ENGINE:-vllm} endpoint to finish loading $MODEL_REPO (this can take several minutes for a large model)..."
   local waited=0 max_wait=1800
   while (( waited < max_wait )); do
     if curl -fsS --max-time 5 -o /dev/null \
          -H "Authorization: Bearer $VLLM_API_KEY" \
          "https://$API_HOSTNAME/v1/models"; then
-      log_ok "vLLM endpoint is serving."
+      log_ok "${ENGINE:-vllm} endpoint is serving."
       return
     fi
     sleep 15; waited=$((waited + 15))
   done
-  log_warn "vLLM endpoint didn't respond within ${max_wait}s - it may still be loading, or something failed. Check 'ssh -i $SSH_KEY_PATH -p $SSH_PORT root@$SSH_HOST' and look at the container's own stdout (RunPod console > pod > Logs), since this script doesn't have a way to tail that remotely."
+  log_warn "${ENGINE:-vllm} endpoint didn't respond within ${max_wait}s - it may still be loading, or something failed. Check the RunPod console (pod > Logs), or 'ssh -i $SSH_KEY_PATH root@\$SSH_PROXY_HOST.ssh.runpod.io' (resolve_pod_ssh_proxy_host() in lib/common.sh; requires a real terminal/PTY, see its comment - not scriptable)."
+}
+
+# Launches idle-watchdog.sh (repo root) detached on THIS machine - see that
+# script's own header comment for the full design/caveat. IDLE_MINUTES=0
+# skips it entirely (only the --terminate-after wall-clock backstop
+# applies), for anyone who'd rather manage shutdown by hand. Writes the
+# watcher's own PID next to its log file so it can be found/killed later if
+# needed; not tracked any further by this script.
+maybe_start_idle_watchdog() {
+  if [[ "$IDLE_MINUTES" == 0 ]]; then
+    log_info "IDLE_MINUTES=0 - idle auto-shutdown disabled, only --max-runtime-hours ($MAX_RUNTIME_HOURS h) applies."
+    return
+  fi
+  mkdir -p "$CONFIG_DIR/logs"
+  nohup "$SCRIPT_DIR/idle-watchdog.sh" "$POD_ID" "$API_HOSTNAME" "$VLLM_API_KEY" "$IDLE_MINUTES" "${ENGINE:-vllm}" \
+    >>"$CONFIG_DIR/logs/idle-watchdog-$POD_ID.log" 2>&1 &
+  echo "$!" > "$CONFIG_DIR/logs/idle-watchdog-$POD_ID.pid"
+  log_ok "Started local idle-watchdog (PID $!, ${IDLE_MINUTES}m idle window) - log: $CONFIG_DIR/logs/idle-watchdog-$POD_ID.log"
 }
 
 # --- entry point -------------------------------------------------------------
@@ -544,26 +563,24 @@ run_normal_launch() {
     log_info "STORAGE_MODE=container-disk: no network volume, model weights will download fresh onto the pod's own disk this run."
   fi
   pick_preset_and_gpu
-  if [[ "$STORAGE_MODE" == "network-volume" ]]; then
-    maybe_run_prewarm
-  fi
-
-  if [[ "${PREWARM_ONLY:-0}" == 1 ]]; then
-    log_info ""
-    log_ok "Prewarm-only run done - no GPU pod created. Launch normally when you're ready."
-    return
-  fi
 
   create_pod
   wait_for_pod_ready
   wait_for_vllm_ready
+  maybe_start_idle_watchdog
+
+  # Best-effort - a failure here doesn't affect the endpoint at all, only
+  # the diagnostics line printed below.
+  resolve_pod_ssh_proxy_host || log_warn "Could not resolve an SSH diagnostics endpoint for this pod - the endpoint above still works fine, this only affects manual troubleshooting."
 
   log_info ""
   log_ok "Pod ready."
   log_info "OpenAI-compatible endpoint: https://$API_HOSTNAME/v1"
   log_info "Model name for clients: $SERVED_MODEL_NAME"
   log_info "API key (Authorization: Bearer <key> - one-off, generated for this pod, shown once, not stored anywhere): $VLLM_API_KEY"
-  log_info "Diagnostics: ssh -i $SSH_KEY_PATH -p $SSH_PORT root@$SSH_HOST"
-  log_info "  (that SSH key is registered with your RunPod account for this pod only - it stops being useful once the pod is stopped/deleted, and 'runpodctl ssh remove-key --fingerprint $SSH_KEY_FINGERPRINT' revokes it from your account sooner if you want that.)"
+  if [[ -n "${SSH_PROXY_HOST:-}" ]]; then
+    log_info "Diagnostics: ssh -i $SSH_KEY_PATH root@$SSH_PROXY_HOST.ssh.runpod.io"
+    log_info "  (proxy SSH, not direct-TCP - the bare vllm-openai image has no sshd. Requires a real terminal; needs a PTY. Key is registered with your RunPod account for this pod only - 'runpodctl ssh remove-key --fingerprint $SSH_KEY_FINGERPRINT' revokes it sooner if you want that.)"
+  fi
   log_info "Pod ID: $POD_ID   Model: $MODEL_REPO   Quantization: ${MODEL_QUANTIZATION:-auto}   Context: $MAX_MODEL_LEN   Idle limit: ${IDLE_MINUTES}m   Max runtime: ${MAX_RUNTIME_HOURS}h"
 }

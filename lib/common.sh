@@ -153,32 +153,41 @@ cleanup_ephemeral_ssh_key() {
   [[ -n "${SSH_KEY_PATH:-}" ]] && rm -rf "$(dirname "$SSH_KEY_PATH")"
 }
 
-# Resolves $POD_ID's direct-TCP SSH endpoint (sets SSH_HOST/SSH_PORT) via
-# `runpodctl ssh info`, so callers can ssh straight into the pod's own public
-# IP with the ephemeral key from setup_ephemeral_ssh_key() above - no
-# Cloudflare tunnel, no console-only ssh.runpod.io proxy hash to guess.
-# This only works because
-# `runpodctl pod create` exposes 22/tcp by default (its --ssh flag, on
-# unless a caller passes --ports without 22/tcp - confirmed against
-# runpodctl's own source, internal/sshconnect/sshconnect.go: PublicSSHPort
-# only matches a runtime port with PrivatePort==22 and IsIpPublic==true).
+# Resolves $POD_ID's SSH-over-proxy target (sets SSH_PROXY_HOST to
+# "<pod-id>-<hash>") for diagnostics: `ssh -i $SSH_KEY_PATH
+# root@$SSH_PROXY_HOST.ssh.runpod.io`. This is NOT direct-TCP SSH
+# (resolve_pod_ssh_endpoint() used to do that, removed 2026-08-14 along
+# with the custom image - the bare vllm/vllm-openai image never starts an
+# sshd, so 22/tcp is never listening for RunPod to map). RunPod's proxy
+# instead execs directly into the container on their own infra side, using
+# the same ephemeral key registered via setup_ephemeral_ssh_key() -
+# confirmed live 2026-08-14. The "<hash>" isn't exposed by runpodctl at
+# all; only RunPod's GraphQL API has it (machine.podHostId), confirmed by
+# testing every runpodctl subcommand first and finding none of them
+# surface it.
 #
-# Polls rather than checking once: `runpodctl ssh info` reports "pod not
-# ready" for a bit after desiredStatus flips to RUNNING, because the
-# runtime port mapping lags behind it (confirmed live 2026-08-14 against a
-# pod that was already SSH-reachable by hand while this still failed).
-resolve_pod_ssh_endpoint() {
-  local waited=0 max_wait=90 info
-  while (( waited < max_wait )); do
-    info="$(runpodctl_t ssh info "$POD_ID" 2>/dev/null)" || true
-    SSH_HOST="$(jq -r '.ip // empty' <<< "$info")"
-    SSH_PORT="$(jq -r '.port // empty' <<< "$info")"
-    [[ -n "$SSH_HOST" && -n "$SSH_PORT" ]] && return 0
-    sleep 3
-    waited=$((waited + 3))
-  done
-  log_error "Could not resolve a direct SSH endpoint for pod $POD_ID after ${max_wait}s (needs 22/tcp exposed - see create_pod()). Last 'runpodctl ssh info' response: $info"
-  return 1
+# Also confirmed live: this proxy connection REQUIRES a real PTY and
+# rejects a command argument outright ("Error: Your SSH client doesn't
+# support PTY" with -T; a command argument with -tt is silently ignored
+# and drops into an interactive shell instead) - so this is diagnostics-
+# only, not something a script can pipe a single command through cleanly.
+# Not used by wait_for_pod_ready() below; readiness is wait_for_vllm_ready()
+# polling the actual HTTP endpoint, same signal a real client would use.
+resolve_pod_ssh_proxy_host() {
+  local gql body resp
+  gql='query GetPod($id: String!) { pod(input: {podId: $id}) { machine { podHostId } } }'
+  body="$(jq -n --arg q "$gql" --arg id "$POD_ID" '{query: $q, variables: {id: $id}}')"
+  resp="$(curl -fsS --max-time "$RUNPODCTL_TIMEOUT_SECS" -X POST \
+    "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+    -H "Content-Type: application/json" -d "$body")" || {
+    log_error "GraphQL request for pod $POD_ID's SSH proxy host failed."
+    return 1
+  }
+  SSH_PROXY_HOST="$(jq -r '.data.pod.machine.podHostId // empty' <<< "$resp")"
+  [[ -n "$SSH_PROXY_HOST" ]] || {
+    log_error "No podHostId in GraphQL response for pod $POD_ID: $resp"
+    return 1
+  }
 }
 
 # Tightens a sensitive file to 600 (owner read/write only) if it isn't
@@ -234,7 +243,14 @@ secret_store() {
 
 secret_lookup() {
   local field="$1"
-  secret-tool lookup service "$SECRET_SERVICE" field "$field" 2>/dev/null
+  # `|| true`: callers check emptiness of the output, not this function's
+  # exit code. Without it, a lookup failure (locked keyring, no entry, a
+  # D-Bus hiccup) makes THIS command substitution's exit status non-zero;
+  # if a caller does `var="$(secret_lookup ...)"` as a bare assignment,
+  # `set -e` treats that as the assignment's own exit status and kills the
+  # whole script right there - silently, before any die() with a real
+  # message gets a chance to run.
+  secret-tool lookup service "$SECRET_SERVICE" field "$field" 2>/dev/null || true
 }
 
 secret_clear() {
@@ -268,6 +284,17 @@ load_secrets() {
 
   RUNPOD_API_KEY="$(secret_lookup runpod_api_key)"
   [[ -n "$RUNPOD_API_KEY" ]] || die "No RUNPOD_API_KEY in the OS keyring. Run 'startup.sh --setup' (or --rotate) to store one."
+
+  # HF_TOKEN is optional and unrelated to RUNPOD_API_KEY above - it's not
+  # needed for any repo in the PRESET_TABLE right now (all public/ungated),
+  # but authenticating with HF's hf_xet download path is reported to be
+  # faster/more reliable than anonymous requests even for public repos
+  # (docs.huggingface.co/docs/huggingface_hub/en/guides/download#faster-downloads:
+  # hf_xet's CAS step "confirms the user is authorized" before handing out
+  # presigned chunk URLs, which anonymous requests don't get routed through
+  # the same way). Silently empty if never stored - create_pod() (lib/
+  # launch.sh) only adds it to a pod's env when non-empty.
+  HF_TOKEN="$(secret_lookup hf_token)"
 }
 
 # Safeword for free-text prompts (see prompt_text below). Distinct from the

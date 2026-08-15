@@ -21,8 +21,6 @@ source "$SCRIPT_DIR/lib/launch.sh"
 SETUP=0
 ROTATE=0
 NEW_SESSION=0
-FORCE_PREWARM=0
-PREWARM_ONLY=0
 IDLE_MINUTES=20
 MAX_RUNTIME_HOURS=4
 STORAGE_MODE="network-volume"
@@ -31,32 +29,29 @@ DEBUG=0
 
 usage() {
   cat <<EOF
-Usage: $0 [--setup] [--rotate] [--new] [--prewarm] [--prewarm-only] [--idle-minutes N] [--max-runtime-hours N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
+Usage: $0 [--setup] [--rotate] [--new] [--idle-minutes N] [--max-runtime-hours N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
 
   --setup                 Force the first-run setup wizard, even if config exists.
   --rotate                Re-paste the RunPod API key, without redoing the rest of
                            setup. The vLLM API key and SSH keypair are generated fresh
                            on every launch already - nothing to rotate for either.
   --new                   Re-pick GPU/model instead of reusing the last session.
-  --prewarm                Force a model-weights prewarm run on a cheap CPU pod even if
-                           this volume is already marked prewarmed for this model, then
-                           continue to the normal GPU pod launch (see lib/launch.sh).
-                           Ignored (and refused) with --storage-mode container-disk -
-                           there's no persistent volume to prewarm in that mode.
-  --prewarm-only           Run the prewarm (forced) and stop - no GPU pod gets created.
-                           Useful for "warm the volume now, launch the real pod later".
   --idle-minutes N        Minutes with no vLLM request activity before the pod
-                           auto-shuts-down (default 20).
+                           auto-shuts-down (default 20). 0 disables idle auto-shutdown
+                           entirely - see maybe_start_idle_watchdog() in lib/launch.sh.
   --max-runtime-hours N   Hard wall-clock cap on the pod's lifetime, regardless of activity (default 4).
   --storage-mode MODE     "network-volume" (default): weights persist on a billed network
-                           volume across pod recreations. "container-disk": no network
+                           volume across pod recreations, so a second launch of the same
+                           model skips re-downloading it. "container-disk": no network
                            volume, weights land on a bigger local disk instead (faster
-                           reads) but re-download every session and don't survive
-                           idle-watchdog.sh deleting the pod.
-  --no-logging             Disable vLLM's stats/access logging and idle-watchdog.sh's disk
-                           log for this pod, on top of vLLM's own default of not logging
-                           prompt/response content. See CHANGELOG.md for what this does
-                           and does not cover.
+                           reads) but re-download every launch and don't survive the pod
+                           being stopped/deleted.
+  --no-logging             Disable the engine's stats/access logging for this pod
+                           (--disable-log-stats/--disable-uvicorn-access-log for vLLM
+                           presets, --log-disable for llama.cpp presets - see ENGINE in
+                           lib/launch.sh's PRESET_TABLE), on top of both engines' own
+                           default of not logging prompt/response content. See
+                           CHANGELOG.md for what this does and does not cover.
   --debug                  Trace every command (set -x) to both the terminal and a
                            timestamped log file under ~/.runpod-lab/logs, tagged with the
                            build number. Use this if something hangs or fails with no
@@ -76,8 +71,6 @@ while (( $# > 0 )); do
     --setup) SETUP=1 ;;
     --rotate) ROTATE=1 ;;
     --new) NEW_SESSION=1 ;;
-    --prewarm) FORCE_PREWARM=1 ;;
-    --prewarm-only) FORCE_PREWARM=1; PREWARM_ONLY=1 ;;
     --idle-minutes) IDLE_MINUTES="$2"; shift ;;
     --max-runtime-hours) MAX_RUNTIME_HOURS="$2"; shift ;;
     --storage-mode) STORAGE_MODE="$2"; shift ;;
@@ -94,8 +87,6 @@ done
 [[ "$MAX_RUNTIME_HOURS" =~ ^[0-9]+$ ]] || die "--max-runtime-hours needs a number."
 [[ "$STORAGE_MODE" == "network-volume" || "$STORAGE_MODE" == "container-disk" ]] \
   || die "--storage-mode must be 'network-volume' or 'container-disk', got '$STORAGE_MODE'."
-[[ "$STORAGE_MODE" == "container-disk" && "$FORCE_PREWARM" == 1 ]] \
-  && die "--prewarm/--prewarm-only make no sense with --storage-mode container-disk - there's no persistent volume to prewarm."
 export STORAGE_MODE
 [[ "$DEBUG" == 1 ]] && enable_debug_logging startup "$DEBUG_MODE"
 

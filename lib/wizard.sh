@@ -59,6 +59,30 @@ setup_runpod_api_key() {
   log_ok "RunPod API key validated."
 }
 
+# --- step 2b: optional HF token ---------------------------------------------
+
+# Optional and skippable: not needed for any repo currently in
+# PRESET_TABLE (all public/ungated), but authenticated hf_xet downloads are
+# reported faster/more reliable than anonymous ones even for public repos
+# (see load_secrets() in lib/common.sh for the doc citation) and it's
+# required for any gated/private repo added later. A read-only token is
+# enough - this repo never uploads anything.
+setup_hf_token() {
+  log_info ""
+  log_info "== Step 2b: Hugging Face token (optional) =="
+  log_info "Not required for the presets in this repo today, but can speed up" \
+           "model downloads and is needed for any gated/private repo. Get a" \
+           "read-only one at https://huggingface.co/settings/tokens if you want one."
+  local hf_token
+  prompt_text "Paste an HF token, or leave blank to skip ($TEXT_BACK_WORD to go back): " hf_token -s || return 1
+  if [[ -n "$hf_token" ]]; then
+    secret_store hf_token "$hf_token"
+    log_ok "HF token stored in the OS keyring."
+  else
+    log_info "Skipped - no HF token stored."
+  fi
+}
+
 # --- step 3: datacenter choice ---------------------------------------------
 
 setup_datacenter() {
@@ -203,6 +227,7 @@ run_setup_wizard() {
   # scratch.
   local -a wizard_steps=(
     setup_runpod_api_key
+    setup_hf_token
     setup_datacenter
     setup_network_volume
   )

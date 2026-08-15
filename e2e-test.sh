@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
 # e2e-test.sh - runs on your own machine, same as startup.sh. Boots a real,
-# billed GPU pod end to end and checks it actually works: reachable directly
-# over SSH (the pod's own 22/tcp, via resolve_pod_ssh_endpoint() in
-# lib/common.sh - no Cloudflare involved), serving real completions through
-# RunPod's own per-pod proxy URL, and (optionally) that idle-watchdog.sh
-# really shuts it down. Always tears the pod down afterward (pass or fail),
-# same as maybe_run_prewarm()'s CPU-pod cleanup in lib/launch.sh.
+# billed GPU pod end to end and checks it actually works: serving real
+# completions through RunPod's own per-pod proxy URL, and (optionally) that
+# idle-watchdog.sh (now running locally - see lib/launch.sh's
+# maybe_start_idle_watchdog()) really shuts it down. Always tears the pod
+# down afterward (pass or fail).
 #
-# Exists because every previous attempt at this (see handoff.md) was manual
-# and ad hoc, and got derailed by SSH needing a passphrase typed in - fine
-# at a keyboard, fatal for a script. setup_ephemeral_ssh_key() in
-# lib/common.sh generates a fresh, passphrase-free keypair per launch
-# specifically so this script (and anything else non-interactive) can run
-# unattended.
+# No SSH check here anymore: the bare vllm/vllm-openai image (see
+# CHANGELOG.md, 2026-08-14) has no sshd at all, so there is no on-pod
+# process to check. resolve_pod_ssh_proxy_host() (lib/common.sh) exists for
+# manual diagnostics only, and requires a real PTY - not scriptable.
 #
 # Requires `./startup.sh --setup` already completed - this script reuses
 # your existing config, it doesn't create one. Does NOT touch
@@ -31,7 +28,6 @@ KEEP_POD=0
 CHECK_IDLE_SHUTDOWN=0
 IDLE_MINUTES=3
 MAX_RUNTIME_HOURS=1
-SKIP_SSH_CHECK=0
 STORAGE_MODE="network-volume"
 NUKE_LOGGING=0
 DEBUG=0
@@ -39,7 +35,7 @@ GPU_ID_OVERRIDE=""
 
 usage() {
   cat <<EOF
-Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--idle-minutes N] [--skip-ssh-check] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
+Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--idle-minutes N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
 
   --preset NAME            Built-in preset to test (see lib/launch.sh's PRESET_TABLE
                             for values). Defaults to the smallest/fastest-loading one.
@@ -47,22 +43,23 @@ Usage: $0 [--preset NAME] [--keep] [--check-idle-shutdown] [--idle-minutes N] [-
                             floor to pick a GPU against.
   --keep                    Don't tear the pod down at the end - leave it running for
                             manual poking. YOU are responsible for stopping/deleting it.
+                            Also skips starting the local idle-watchdog, since it would
+                            otherwise stop/delete the pod out from under you once idle.
   --check-idle-shutdown     After the smoke checks pass, additionally wait out the idle
-                            window and confirm idle-watchdog.sh actually stops/deletes
-                            the pod itself, instead of this script tearing it down.
-                            Adds roughly --idle-minutes to the run. Ignored with --keep.
+                            window and confirm the local idle-watchdog actually stops/
+                            deletes the pod itself, instead of this script tearing it
+                            down. Adds roughly --idle-minutes to the run. Ignored with
+                            --keep.
   --idle-minutes N          Idle window for this run (default 3 - short on purpose,
                             this is a throwaway test pod, not a real session).
-  --skip-ssh-check          Skip the extra on-pod process check (sshd/idle-watchdog/
-                            vllm all running, checked over one SSH round trip). SSH
-                            itself is still required for the pod to be considered
-                            ready at all - see wait_for_pod_ready() in lib/launch.sh.
   --storage-mode MODE       "network-volume" (default) or "container-disk" - see
                             lib/launch.sh. Run this script once with each value (same
                             --preset) to A/B compare: this script prints the wall-clock
                             time from pod-create to vLLM-ready either way, which is the
                             main cost/speed axis that differs between the two modes.
-  --no-logging              Passes DISABLE_LOGGING=1 to the pod - see image/entrypoint.sh.
+  --no-logging              Disables the engine's stats/access logging (vLLM or
+                            llama.cpp, whichever the --preset uses) - see create_pod()
+                            in lib/launch.sh.
   --gpu-id ID               Skip the "cheapest available" auto-pick and use this exact
                              GPU id (as printed by 'runpodctl gpu list', e.g. the
                              quoted display name). Use when the cheapest GPU meeting
@@ -83,7 +80,6 @@ while (( $# > 0 )); do
     --keep) KEEP_POD=1 ;;
     --check-idle-shutdown) CHECK_IDLE_SHUTDOWN=1 ;;
     --idle-minutes) IDLE_MINUTES="$2"; shift ;;
-    --skip-ssh-check) SKIP_SSH_CHECK=1 ;;
     --storage-mode) STORAGE_MODE="$2"; shift ;;
     --no-logging) NUKE_LOGGING=1 ;;
     --gpu-id) GPU_ID_OVERRIDE="$2"; shift ;;
@@ -112,12 +108,12 @@ validate_runpod_api_key
 # --- resolve preset (non-interactively - no menus here) ---------------------
 
 resolve_preset() {
-  local -a values=() repos=() served=() min_vrams=() ctxs=() quants=()
-  local value repo served_name min_vram ctx quant label
-  while IFS='|' read -r value repo served_name min_vram ctx quant label; do
+  local -a values=() engines=() repos=() served=() min_vrams=() ctxs=() quants=() extras=()
+  local value engine repo served_name min_vram ctx quant extra_args label
+  while IFS='|' read -r value engine repo served_name min_vram ctx quant extra_args label; do
     [[ -z "$value" ]] && continue
-    values+=("$value"); repos+=("$repo"); served+=("$served_name")
-    min_vrams+=("$min_vram"); ctxs+=("$ctx"); quants+=("$quant")
+    values+=("$value"); engines+=("$engine"); repos+=("$repo"); served+=("$served_name")
+    min_vrams+=("$min_vram"); ctxs+=("$ctx"); quants+=("$quant"); extras+=("$extra_args")
   done <<< "$PRESET_TABLE"
 
   # Default: cheapest floor + smallest weights, so a routine e2e run costs
@@ -128,9 +124,11 @@ resolve_preset() {
   local i
   for i in "${!values[@]}"; do
     if [[ "${values[$i]}" == "$PRESET_NAME" ]]; then
+      ENGINE="${engines[$i]}"
       MODEL_REPO="${repos[$i]}"
       SERVED_MODEL_NAME="${served[$i]}"
       MODEL_QUANTIZATION="${quants[$i]}"
+      MODEL_EXTRA_ARGS="${extras[$i]}"
       MAX_MODEL_LEN="${ctxs[$i]}"
       TEST_MIN_VRAM="${min_vrams[$i]}"
       return
@@ -139,7 +137,7 @@ resolve_preset() {
   die "Unknown preset '$PRESET_NAME' (or it's 'custom', which this script doesn't support - see --help). Check lib/launch.sh's PRESET_TABLE for valid values."
 }
 resolve_preset
-log_info "Preset: $PRESET_NAME ($MODEL_REPO, quantization=$MODEL_QUANTIZATION, min ${TEST_MIN_VRAM}GB VRAM)"
+log_info "Preset: $PRESET_NAME (engine=$ENGINE, $MODEL_REPO, quantization=$MODEL_QUANTIZATION, min ${TEST_MIN_VRAM}GB VRAM)"
 
 # --- pick the cheapest GPU meeting the floor ---------------------------------
 
@@ -169,12 +167,13 @@ POD_CREATED=0
 # behind because a check failed partway through would be the worst possible
 # outcome for a test script. `|| true` on the runpodctl calls: under `set
 # -e`, a failing command inside a trap can take the whole script down with
-# it before the trap even finishes (see maybe_run_prewarm()'s identical
-# comment in lib/launch.sh) - and these calls are *expected* to occasionally
-# fail here too (e.g. --check-idle-shutdown's pod already self-terminated).
+# it before the trap even finishes - and these calls are *expected* to
+# occasionally fail here too (e.g. --check-idle-shutdown's pod already
+# self-terminated).
 cleanup() {
   if [[ "$POD_CREATED" == 1 && "$KEEP_POD" != 1 ]]; then
     log_info ""
+    [[ -n "${IDLE_WATCHDOG_PID:-}" ]] && kill "$IDLE_WATCHDOG_PID" 2>/dev/null
     log_info "Tearing down pod $POD_ID..."
     runpodctl_t pod stop "$POD_ID" >/dev/null 2>&1 || true
     runpodctl_t pod delete "$POD_ID" >/dev/null 2>&1 || true
@@ -188,8 +187,8 @@ trap cleanup EXIT
 
 # Timed from create_pod through vLLM actually serving - the wall-clock axis
 # that differs between storage modes: network-volume pays this once (later
-# runs skip the download via maybe_run_prewarm/HF_HOME caching),
-# container-disk pays it fresh every single run. Run this script once per
+# launches of the same preset skip the download via HF_HOME persisting on
+# the volume), container-disk pays it fresh every single run. Run this script once per
 # --storage-mode (same --preset) and compare the two numbers this prints,
 # alongside lib/launch.sh's CONTAINER_DISK_GB_STANDALONE comment and
 # README's storage rate table, to see which is actually cheaper for your
@@ -203,6 +202,14 @@ wait_for_vllm_ready
 launch_elapsed=$(( $(date +%s) - launch_started ))
 log_info ""
 log_info "Timing (storage-mode=$STORAGE_MODE, preset=$PRESET_NAME): ${launch_elapsed}s from pod-create to vLLM-ready."
+
+# Only started when the pod's lifetime is actually managed by this script -
+# with --keep, the operator is responsible for the pod, and an idle-watchdog
+# running unattended against it would delete it out from under them.
+if [[ "$KEEP_POD" != 1 ]]; then
+  maybe_start_idle_watchdog
+  IDLE_WATCHDOG_PID="$(cat "$CONFIG_DIR/logs/idle-watchdog-$POD_ID.pid" 2>/dev/null || true)"
+fi
 
 # --- checks --------------------------------------------------------------
 
@@ -229,28 +236,16 @@ check_chat_completion() {
   [[ -n "$(jq -r '.choices[0].message.content // empty' <<< "$resp")" ]]
 }
 
-check_ssh_processes() {
-  # sshd/idle-watchdog/vllm all confirmed up via one round trip, rather
-  # than three separate ssh calls each paying the connection cost. Direct
-  # pod IP:port, resolved by wait_for_pod_ready() (lib/launch.sh) already -
-  # no Cloudflare anywhere in this repo anymore (see CHANGELOG.md).
-  ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
-    -i "$SSH_KEY_PATH" -p "$SSH_PORT" "root@$SSH_HOST" '
-    set -e
-    pgrep -x sshd >/dev/null
-    pgrep -f "idle-watchdog.sh" >/dev/null
-    pgrep -f "vllm serve" >/dev/null
-  '
+check_idle_watchdog_running() {
+  [[ -n "${IDLE_WATCHDOG_PID:-}" ]] && kill -0 "$IDLE_WATCHDOG_PID" 2>/dev/null
 }
 
 log_info ""
 log_info "Running checks..."
 check "GET /v1/models lists $SERVED_MODEL_NAME" check_models_endpoint
 check "POST /v1/chat/completions returns a real completion" check_chat_completion
-if [[ "$SKIP_SSH_CHECK" != 1 ]]; then
-  check "SSH reachable, sshd/idle-watchdog/vllm all running" check_ssh_processes
-else
-  log_warn "SKIP: SSH/process checks (--skip-ssh-check passed)."
+if [[ "$KEEP_POD" != 1 ]]; then
+  check "Local idle-watchdog process is running" check_idle_watchdog_running
 fi
 
 # --- optional: prove idle-watchdog.sh actually shuts the pod down -----------

@@ -5,8 +5,11 @@ first time. The setup wizard in `startup.sh` handles everything else -
 installing local tools, creating the network volume - so this list is
 only what has to happen on RunPod's own website before the wizard can
 take over. There's no third-party tunnel service in the picture at all
-(see CHANGELOG.md for why Cloudflare was dropped): RunPod exposes both
-SSH (`22/tcp`) and the vLLM HTTP endpoint directly, per pod.
+(see CHANGELOG.md for why Cloudflare was dropped): RunPod exposes the
+vLLM HTTP endpoint directly, per pod, through its own proxy. There's no
+sshd on the pod - it runs vLLM's bare official image with no wrapper -
+so diagnostics use RunPod's SSH-over-proxy instead, which doesn't need
+one (see `resolve_pod_ssh_proxy_host()` in `lib/common.sh`).
 
 ## RunPod
 
@@ -77,7 +80,8 @@ overhead); see `lib/launch.sh`'s `PRESET_TABLE` for the exact HF repos.
 | `qwen3-coder-30b-moe` | ~17GB | 24GB (RTX 4090) | 60GB |
 | `qwen2.5-72b` | ~41GB | 48GB (A6000/L40S) | 100GB |
 | `llama3.3-70b` | ~39GB | 48GB (A6000/L40S) | 100GB |
-| `qwen3.5-40b-deckard` | ~40GB (bf16 repo, quantized to FP8 on the fly - no separate quant repo to size for) | 48GB (A6000/L40S) | 100GB |
+| `qwen3.5-40b-deckard` | ~40GB (bf16 repo, quantized to FP8 on the fly - no separate quant repo to size for) | 80GB (A100 80GB/H100) | 100GB |
+| `qwen3.6-27b-awq-mtp` | ~18GB | 24GB (RTX 4090/L4) | 60GB |
 | Several presets cached side by side | - | - | 150-200GB |
 | `custom` (any HF repo) | depends on the model | you decide | the launch wizard prompts to grow the volume if needed (RunPod only allows growing, never shrinking, and it's a billed, permanent change) |
 
