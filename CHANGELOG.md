@@ -4,6 +4,33 @@
 
 ### Unreleased
 
+## [2.0.0] - 2026-08-14
+
+### Added
+- llama.cpp as a second serving engine alongside vLLM: `PRESET_TABLE` (`lib/launch.sh`) gained an `engine` column (`vllm` or `llamacpp`) and a `LLAMACPP_IMAGE_NAME` pointing at `ggml-org/llama.cpp:server-cuda`. `create_pod()` branches on `ENGINE` to build the right `--docker-args` (`--hf-repo`/`--alias`/`--ctx-size`/`--n-gpu-layers 999`/`--metrics` for llamacpp vs. `--model`/`--served-model-name`/`--max-model-len`/`--quantization` for vLLM) and env (`LLAMA_CACHE` vs. `HF_HOME` on the network volume). New preset `qwen3.5-40b-deckard-gguf` (`mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S`, 256K context) is the first to use it, verified live through RunPod's proxy for both `/v1/models` and `/v1/chat/completions`.
+- New preset `qwen3.6-27b-awq-mtp` (`shawnw3i/Qwen3.6-27B-AWQ-MTP`), verified live end-to-end on a 24GB L4: AWQ weights (~18GB), `--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager`, confirmed serving real completions through the fixed proxy URL. Unlike the other AWQ presets it pins `--quantization awq` rather than `auto`, since vLLM rejects `auto` against a repo whose `config.json` already declares an explicit quantization method.
+- `PRESET_TABLE` gained an `extra_args` column (space-separated per-preset `vllm serve`/`llama-server` flags, `-` for none), added because hybrid Gated-DeltaNet/full-attention models (the Qwen3.5/3.6 architecture) need extra fixed memory for recurrent/mamba state on top of normal KV cache - confirmed live when the default `--gpu-memory-utilization 0.9` left only 0.39GiB free after AWQ weights loaded on a 24GB L4, crashing `_initialize_kv_caches`.
+- `resolve_pod_ssh_proxy_host()` (`lib/common.sh`): resolves a pod's SSH-over-proxy target via RunPod's GraphQL API (`machine.podHostId`), since no `runpodctl` subcommand surfaces it.
+- Optional Hugging Face token setup: a new wizard step (`setup_hf_token()`, `lib/wizard.sh`) stores an HF token in the OS keyring, and `load_secrets()` (`lib/common.sh`) loads it into `HF_TOKEN`, passed to the pod's env when set. Not required for any preset today (all public/ungated repos), but authenticated `hf_xet` downloads are documented as faster/more reliable than anonymous ones, and it is needed for any gated/private repo added later.
+
+### Changed
+- Pods now run the official `vllm/vllm-openai:latest` or `ggml-org/llama.cpp:server-cuda` images directly instead of a custom-built pod image, with model/runtime settings passed as `--docker-args` appended to each image's fixed entrypoint rather than `--env` vars a custom wrapper script used to translate.
+- `create_pod()` now passes `--ports "8000/http"` to `runpodctl pod create`. Without it, RunPod's proxy 404s on `<pod-id>-8000.proxy.runpod.net` forever even once the engine is fully healthy inside the container - confirmed live: `curl localhost:8000/health` inside the pod returned 200 while the external proxy 404'd for 10+ minutes straight, until `--ports` was added, after which the same URL went 404 -> 502 (booting) -> 200 (ready) normally. This is very likely the real cause of most prior "pod launch failed" reports, independent of model or GPU choice.
+- Diagnostics now reach the pod through RunPod's own SSH-over-proxy (`resolve_pod_ssh_proxy_host()`, `lib/common.sh`) instead of direct-TCP SSH or a Cloudflare Tunnel - the bare official images never start an `sshd`, so 22/tcp is never listening. This execs into the container on RunPod's own infra side and needs no `sshd`, but requires a real PTY and rejects a piped command, so it is diagnostics-only, not scriptable.
+- `idle-watchdog.sh` now runs on the operator's own machine (launched detached by the new `maybe_start_idle_watchdog()` in `lib/launch.sh`) instead of on the pod, since the bare images have no room to host a second background process. It polls the engine's own `/metrics` through RunPod's proxy (with the bearer token) instead of `localhost` on the pod, is engine-aware (vLLM's `vllm:request_success_total`/`vllm:num_requests_running` vs. llama.cpp's `llamacpp:tokens_predicted_total`/`llamacpp:requests_processing`, per llama.cpp's server docs), and calls `runpodctl_t` directly instead of a bare `runpodctl` call baked into the container. `RUNPOD_API_KEY` no longer needs to be placed on the pod's `--env` at all, since nothing running on the pod needs to call the RunPod API to self-terminate anymore - a real reduction in credential exposure, not just incidental to the image removal.
+- `--no-logging` is now engine-generic: it maps to `--disable-log-stats --disable-uvicorn-access-log` for vLLM presets or `--log-disable` for llama.cpp presets, instead of a single vLLM-specific pair of flags.
+- `IMAGE_NAME` (`lib/launch.sh`) changed from the custom `ghcr.io/kinsman4249/runpod-helper-image:latest` to `vllm/vllm-openai:latest`.
+- `qwen3.5-40b-deckard`'s `min_vram` and default context were raised to 80GB and 262144 (from 48GB/8192) after confirming its hybrid Gated-DeltaNet/full-attention architecture needs substantially more headroom than a dense model at the same context length; it also picked up the same `--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager` extra args as `qwen3.6-27b-awq-mtp`.
+- Setup wizard (`lib/wizard.sh`) gained the optional HF-token step described above between the RunPod API key and datacenter steps.
+- `README.md` and `PREREQUISITES.md` rewritten to describe the official-image, RunPod-proxy-only setup and endpoint access flow, including llama.cpp presets.
+
+### Removed
+- The custom pod image end to end: `image/Dockerfile`, `image/entrypoint.sh`, and `.github/workflows/build-image.yml`.
+- The prewarm workflow (`maybe_run_prewarm()` and the `--prewarm`/`--prewarm-only` flags on `startup.sh`) - it depended entirely on the custom entrypoint's `PREWARM_ONLY` branch (download weights on a cheap CPU pod, then self-terminate instead of exec-ing into the server), which no longer exists once the custom image is gone. The official images' fixed entrypoints have no way to download-without-serving, so this is no longer possible to implement the same way.
+- Cloudflare Tunnel integration end to end: `cloudflared` install/download, tunnel-token validation and extraction, the Cloudflare Tunnel wizard step, and tunnel process/log handling.
+- `sshd` on the pod, and with it `lock_ssh_to_first_client()`'s SSH IP-pinning and `resolve_pod_ssh_endpoint()`'s direct-TCP-22 readiness check - the official images never start an `sshd`, so 22/tcp is never listening.
+- `CLOUDFLARE_TUNNEL_TOKEN`, `CLOUDFLARE_SSH_HOSTNAME`, and `CLOUDFLARE_API_HOSTNAME` from the config file, keyring, and pod `--env` payload.
+
 ## [1.0.0] - 2026-08-13
 
 ### Added
