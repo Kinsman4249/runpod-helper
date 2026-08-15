@@ -4,6 +4,11 @@
 
 ### Unreleased
 
+## [2.4.2] - 2026-08-15
+
+### Fixed
+- Datacenter picker (`setup_datacenter`, `lib/wizard.sh`) showed GPU stock from the `datacenter list` endpoint's own `gpuAvailability[]`, which can disagree with `gpu list`'s `dataCenterAvailability[]` - the endpoint `list_available_gpus()` (`lib/launch.sh`) actually filters on at GPU-pick time. Confirmed live: `datacenter list` reported RTX A5000 in stock at EU-SE-1 while `gpu list` reported none there, and six other (GPU, datacenter) pairs disagreed the same way. Since the datacenter choice is a one-way lock (the network volume is pinned to it), the wizard's menu now sources per-datacenter stock from `gpu list` instead, so it no longer advertises a card the GPU-selection step won't actually offer.
+
 ## [2.4.1] - 2026-08-15
 
 ### Added
