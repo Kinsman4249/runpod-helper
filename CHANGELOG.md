@@ -4,6 +4,16 @@
 
 ### Unreleased
 
+## [2.4.0] - 2026-08-15
+
+### Added
+- `custom-gguf` model option (`lib/gguf.sh`, wired into `pick_preset_and_gpu` in the new `lib/select.sh`): paste any Hugging Face GGUF repo id and pick a quant from what it actually publishes. Quant list and byte sizes come live from the HF tree API (`huggingface.co/api/models/<repo>/tree/main`, `lfs.size` per file, `mmproj` sidecars skipped, multi-part quants summed), sorted smallest-first; quants the repo README flags "recommended" (mradermacher/bartowski layouts) are marked as such. Serves via llama.cpp (`<repo>:<quant>` as `--hf-repo`), computes an approximate GPU VRAM floor (weights + a small KV/compute cushion), and auto-sizes the network volume from the chosen quant's on-disk size.
+- Datacenter picker (`setup_datacenter`, `lib/wizard.sh`) now groups datacenters by the Five/Nine/Fourteen Eyes intelligence-sharing alliances: those outside all three are listed first (privacy-preferred, shown in green), Eyes members follow but stay selectable. Classification is by country - `.location` when specific, else the datacenter id's country-code token - so US-DE-1 correctly reads as United States rather than Germany. Verified against all 49 live datacenters.
+
+### Changed
+- Preset menu labels (`PRESET_TABLE`, `lib/launch.sh`) trimmed to just model, quant, approximate size, the VRAM floor, and whether that floor is "tested live" or "napkin math" (a conservative estimate). The detailed floor derivations moved into a comment above the table.
+- Split `lib/launch.sh` (was over 700 lines) under 500: launch-time model/GPU/volume selection moved to a new `lib/select.sh`, and the custom-GGUF enumeration lives in `lib/gguf.sh`. Pod creation, readiness polling, and the preset table stay in `lib/launch.sh`. `startup.sh` and `e2e-test.sh` source the new files; no behavior change for existing presets.
+
 ## [2.3.0] - 2026-08-15
 
 ### Added
