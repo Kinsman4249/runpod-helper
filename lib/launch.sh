@@ -500,4 +500,20 @@ run_normal_launch() {
         }
       }
     }'
+
+  # Optional: push the same values straight into Kilo Code's and opencode's
+  # configs inside vscodium-box, instead of the user copy-pasting the JSON
+  # above by hand. See sync-runpod-endpoint.sh's own header for why this is
+  # needed (fresh baseURL/apiKey every launch, nothing stored, configs go
+  # stale after a pod is torn down). Values passed directly via
+  # --base-url/--api-key/--model rather than piping the log text above, so
+  # this doesn't depend on the exact wording of the log_info lines.
+  if [[ -x "$SCRIPT_DIR/sync-runpod-endpoint.sh" ]] \
+      && confirm "Sync this endpoint into Kilo Code's and opencode's configs inside vscodium-box now?"; then
+    "$SCRIPT_DIR/sync-runpod-endpoint.sh" \
+      --base-url "https://$API_HOSTNAME/v1" \
+      --api-key "$VLLM_API_KEY" \
+      --model "$SERVED_MODEL_NAME" \
+      || log_warn "sync-runpod-endpoint.sh failed - run it again by hand later, see its --help."
+  fi
 }

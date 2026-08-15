@@ -301,6 +301,51 @@ launched (e.g. `qwen3-coder-30b-moe`) - it must match `SERVED_MODEL_NAME`
 from the launch summary exactly. Then select the `runpod-helper` provider
 from OpenCode's model picker (`/models`).
 
+### Syncing into vscodium-box (Kilo Code / opencode)
+
+If you talk to the pod from Kilo Code or opencode inside
+[vscodium-box](https://github.com/Kinsman4249/vscodium-for-immutable),
+`startup.sh` asks after every launch whether to push the fresh
+`baseURL`/`apiKey`/model straight into both tools' configs, instead of you
+copy-pasting the OpenCode JSON above by hand:
+
+```
+Sync this endpoint into Kilo Code's and opencode's configs inside vscodium-box now? [y/N]
+```
+
+Say yes and it's done - no running container or `podman exec` needed, since
+`~/.config/kilo/` and `~/.config/opencode/` inside vscodium-box are a
+straight bind mount of a directory on the host, so writing the host copy
+writes the container's copy directly. Fields it doesn't know about (extra
+models, Kilo's `permission` block) are left alone. Say no and nothing is
+touched - paste the OpenCode config above by hand instead, or run
+`./sync-runpod-endpoint.sh` again later against a saved log.
+
+That prompt is `sync-runpod-endpoint.sh` under the hood, which also works
+standalone:
+
+```bash
+./sync-runpod-endpoint.sh --base-url URL --api-key KEY --model NAME
+                                                   # sync explicit values directly
+./startup.sh | ./sync-runpod-endpoint.sh          # pipe a live launch straight in
+./sync-runpod-endpoint.sh --log launch.log        # or from a saved log file
+./sync-runpod-endpoint.sh --container-home DIR    # target a different container's
+                                                   # private home instead of vscodium-box's
+```
+
+vscodium-box is the default target, but nothing about the script is specific
+to it - it just needs a private home directory laid out the way
+vscodium-for-immutable's `install-vscodium.sh` lays one out (`.config/kilo/`,
+`.config/opencode/` under a directory bind-mounted to a container's `~`).
+`--container-home` points it at any other one, e.g. a second container built
+the same way.
+
+Only Kilo Code and opencode are wired up - they were the only two of
+Kilo/Cline/Roo/opencode found installed in vscodium-box. Cline and Roo use
+the same `provider.<name>.options.{baseURL,apiKey}` shape in their own
+settings files, so if you install one and hit the same staleness problem,
+add its config path to the `CONFIGS` array in the script.
+
 ## Testing
 
 `./e2e-test.sh` runs the full loop non-interactively against a real
