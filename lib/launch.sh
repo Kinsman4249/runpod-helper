@@ -104,6 +104,14 @@ LLAMACPP_IMAGE_NAME="ghcr.io/ggml-org/llama.cpp:server-cuda"
 #     The -40gb row is the same weights capped at 196608 tokens (192K) to fit a
 #     40GB card - 262144 is the model hard max_position_embeddings (no rope
 #     scaling), so a smaller card buys less context, not a bigger model.
+#   - Both deckard-gguf rows carry --jinja: without it, llama-server ignores
+#     the GGUF's embedded chat template entirely and falls back to its own
+#     minimal built-in formatting, which does not render tool definitions
+#     into the prompt at all (confirmed against llama.cpp's server docs -
+#     "OpenAI-style function calling is supported with the --jinja flag").
+#     Deckard's template is inherited from its Qwen3.5 base and already
+#     knows Qwen's <tool_call> syntax; --jinja just makes llama-server
+#     actually use it instead of overriding it into something schema-less.
 PRESET_TABLE='
 deepseek-r1-distill-32b|vllm|casperhansen/deepseek-r1-distill-qwen-32b-awq|deepseek-r1-32b|24|16384|auto|-|DeepSeek-R1-Distill-Qwen-32B (AWQ ~19GB) - 24GB VRAM floor (napkin math) - dense reasoning
 qwen3-32b|vllm|Qwen/Qwen3-32B-AWQ|qwen3-32b|24|16384|auto|-|Qwen3-32B (AWQ ~19GB) - 24GB VRAM floor (napkin math) - dense general-purpose
@@ -112,8 +120,8 @@ qwen2.5-72b|vllm|Qwen/Qwen2.5-72B-Instruct-AWQ|qwen2.5-72b|48|8192|auto|-|Qwen2.
 llama3.3-70b|vllm|casperhansen/llama-3.3-70b-instruct-awq|llama3.3-70b|48|8192|auto|-|Llama-3.3-70B-Instruct (AWQ ~39GB) - 48GB VRAM floor (napkin math) - non-Qwen option
 qwen3.5-40b-deckard|vllm|DavidAU/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking|qwen3.5-40b-deckard|80|262144|fp8|--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager|Qwen3.5-40B-Deckard (FP8 ~40GB, 256K ctx) - 80GB VRAM floor (napkin math) - uncensored, tool use
 qwen3.6-27b-awq-mtp|vllm|shawnw3i/Qwen3.6-27B-AWQ-MTP|qwen3.6-27b|24|16384|awq|--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager|Qwen3.6-27B-AWQ-MTP (AWQ ~18GB) - 24GB VRAM floor (tested live) - agentic coding
-qwen3.5-40b-deckard-gguf|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|48|262144|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0|Qwen3.5-40B-Deckard GGUF Q5_K_S (~27GB, 256K ctx, llama.cpp) - 48GB VRAM floor (tested live) - uncensored, tool use
-qwen3.5-40b-deckard-gguf-40gb|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|40|196608|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0|Qwen3.5-40B-Deckard GGUF Q5_K_S (~27GB, 192K ctx, llama.cpp) - 40GB VRAM floor (napkin math) - budget/reduced context
+qwen3.5-40b-deckard-gguf|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|48|262144|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0 --jinja|Qwen3.5-40B-Deckard GGUF Q5_K_S (~27GB, 256K ctx, llama.cpp) - 48GB VRAM floor (tested live) - uncensored, tool use
+qwen3.5-40b-deckard-gguf-40gb|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|40|196608|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0 --jinja|Qwen3.5-40B-Deckard GGUF Q5_K_S (~27GB, 192K ctx, llama.cpp) - 40GB VRAM floor (napkin math) - budget/reduced context
 '
 
 # --- GPU listing --------------------------------------------------------

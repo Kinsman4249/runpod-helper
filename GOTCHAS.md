@@ -87,6 +87,23 @@ it down, rather than guessing at the cause from an HTTP status code alone -
 timeouts have turned out to be "still mid-download", not "stuck" or "OOMing",
 more than once.
 
+## Kilo Code needs a restart to pick up a re-sync; opencode doesn't
+
+Confirmed live 2026-08-15: after `sync-runpod-endpoint.sh` rewrites
+`kilo.jsonc`, a Kilo Code session already running keeps using the pod it
+started with, not the new one - it 404s against the old (by then torn-down)
+pod's proxy hostname even though the file on disk is already correct.
+Cause: Kilo caches the provider's API key in its own sqlite store
+(`~/.local/share/kilo/kilo.db`, `credential` table) as a one-time
+`Imported` row at session start, and apparently holds the rest of the
+provider config (including `baseURL`) in memory from the same load rather
+than re-reading `kilo.jsonc` per request. `time_created == time_updated` on
+that row is the tell that it was never refreshed. opencode does not have
+this problem - a running opencode session picks up a re-synced
+`opencode.jsonc` fine. Fix: fully restart Kilo (reload the VSCodium window
+or quit/relaunch the extension) after every re-sync, not just after the
+first one.
+
 ## `runpodctl pod create` writes its error to stderr, not stdout
 
 Confirmed live 2026-08-15: a failed create (capacity error) printed its
