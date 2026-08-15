@@ -473,4 +473,31 @@ run_normal_launch() {
     log_info "  (proxy SSH, not direct-TCP - the bare vllm-openai image has no sshd. Requires a real terminal; needs a PTY. Key is registered with your RunPod account for this pod only - 'runpodctl ssh remove-key --fingerprint $SSH_KEY_FINGERPRINT' revokes it sooner if you want that.)"
   fi
   log_info "Pod ID: $POD_ID   Model: $MODEL_REPO   Quantization: ${MODEL_QUANTIZATION:-auto}   Context: $MAX_MODEL_LEN   Idle limit: ${IDLE_MINUTES}m   Max runtime: ${MAX_RUNTIME_HOURS}h"
+
+  # Fully-populated OpenCode provider config (see README's "Pointing
+  # OpenCode at it" for the {env:...}-based version) - this one bakes the
+  # actual baseURL/apiKey/model in directly rather than making the user
+  # copy them into env vars by hand, since that's just another place to
+  # typo a one-off value that's already only shown here, once. Schema
+  # matches https://opencode.ai/config.json: top-level key is "provider"
+  # (singular), the AI SDK package field is "npm" (not "package"), and
+  # per-provider connection settings live under "options" (not
+  # "settings") - confirmed against opencode's own docs 2026-08-15.
+  log_info ""
+  log_info "OpenCode config - paste as-is into ~/.config/opencode/opencode.json (contains the one-off API key above; not stored anywhere else, so save it now if you want it):"
+  jq -n \
+    --arg baseURL "https://$API_HOSTNAME/v1" \
+    --arg apiKey "$VLLM_API_KEY" \
+    --arg model "$SERVED_MODEL_NAME" \
+    '{
+      "$schema": "https://opencode.ai/config.json",
+      provider: {
+        "runpod-helper": {
+          npm: "@ai-sdk/openai-compatible",
+          name: "runpod-helper",
+          options: { baseURL: $baseURL, apiKey: $apiKey },
+          models: { ($model): { name: $model } }
+        }
+      }
+    }'
 }

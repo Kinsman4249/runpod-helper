@@ -86,3 +86,27 @@ If a launch or e2e-test run times out or fails ambiguously, SSH into the pod
 it down, rather than guessing at the cause from an HTTP status code alone -
 timeouts have turned out to be "still mid-download", not "stuck" or "OOMing",
 more than once.
+
+## `runpodctl pod create` writes its error to stderr, not stdout
+
+Confirmed live 2026-08-15: a failed create (capacity error) printed its
+`{"error":"failed to create pod: graphql error: ..."}` JSON to stderr while
+stdout stayed empty. Code that captures only `"$(runpodctl pod create ...)"`
+gets a blank string on failure - the old `die "...Raw output:\n$out"` showed
+nothing useful. `create_pod()` (`lib/launch.sh`) now captures stderr to a temp
+file separately (not `2>&1`, so a stray stderr warning on an otherwise-good
+create can't corrupt the stdout JSON that `jq` parses for `.id`), which is
+what makes classifying the retryable "This machine does not have the resources
+to deploy your pod" capacity error possible at all.
+
+## `datacenter list`'s `.location` is the generic "Europe" for most EU datacenters
+
+Confirmed live 2026-08-15: `runpodctl datacenter list` returns a specific
+country in `.location` for some datacenters (`United States`, `Canada`,
+`France`, `Japan`, ...) but just `Europe` for most EU ones (`EU-CZ-1`,
+`EU-RO-1`, `EUR-IS-1`, `EUR-NO-1`, `EU-SE-1`, ...). To know the actual country
+for those, read the *second* `-`-separated token of the datacenter `.id` (the
+ISO country code: `EU-RO-1` -> `RO`, `EUR-IS-1` -> `IS`). `setup_datacenter()`
+(`lib/wizard.sh`) classifies by `.location` first and only falls back to the id
+token - deliberately, because `US-DE-1`'s location is `United States`, so
+`DE` there is Delaware, not Germany, and must not be read as a country code.
