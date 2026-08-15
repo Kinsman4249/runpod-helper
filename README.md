@@ -139,6 +139,12 @@ and launches. `./startup.sh --help` prints this same list.
   exists (installs local tools, takes your RunPod API key + optional
   Hugging Face token, picks a datacenter, creates the network volume).
   Runs automatically on the very first launch.
+- `--norotate` - Modifies `--setup`: keep the existing RunPod API key and HF
+  token from the OS keyring instead of re-pasting them, and keep the
+  existing network volume instead of creating a new (billed) one, as long
+  as the datacenter you pick is the same one already on file. Picking a
+  different datacenter still creates a new volume, since a volume is
+  locked to the datacenter it was created in. No effect without `--setup`.
 - `--rotate` - Re-paste just the RunPod API key (validated before it's
   saved) without redoing the rest of setup. The endpoint API key and the
   pod's SSH keypair are generated fresh every launch, so there is nothing

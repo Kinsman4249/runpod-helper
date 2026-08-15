@@ -46,6 +46,19 @@ install_runpodctl() {
 setup_runpod_api_key() {
   log_info ""
   log_info "== Step 2: RunPod API key =="
+
+  if [[ "$NOROTATE" == 1 ]]; then
+    local kept_key
+    kept_key="$(secret_lookup runpod_api_key)"
+    if [[ -n "$kept_key" ]]; then
+      export RUNPOD_API_KEY="$kept_key"
+      validate_runpod_api_key
+      log_ok "Keeping existing RunPod API key from the OS keyring (--norotate) - validated."
+      return 0
+    fi
+    log_info "--norotate was passed but no RunPod API key is in the OS keyring yet - pasting a new one."
+  fi
+
   log_info "Generate one at https://www.runpod.io/console/user/settings (Settings > API Keys) if you haven't already."
   local api_key
   prompt_text "Paste your RunPod API key ($TEXT_BACK_WORD to go back): " api_key -s || return 1
@@ -70,6 +83,12 @@ setup_runpod_api_key() {
 setup_hf_token() {
   log_info ""
   log_info "== Step 2b: Hugging Face token (optional) =="
+
+  if [[ "$NOROTATE" == 1 ]] && [[ -n "$(secret_lookup hf_token)" ]]; then
+    log_ok "Keeping existing HF token from the OS keyring (--norotate)."
+    return 0
+  fi
+
   log_info "Not required for the presets in this repo today, but can speed up" \
            "model downloads and is needed for any gated/private repo. Get a" \
            "read-only one at https://huggingface.co/settings/tokens if you want one."
@@ -220,7 +239,8 @@ setup_datacenter() {
   log_info "those OUTSIDE the 5/9/14 Eyes are listed first (privacy-preferred, shown in green); Eyes"
   log_info "members follow but are all still selectable - pick whichever you want. The grouping is"
   log_info "best-effort from each datacenter's id/location; confirm the real jurisdiction yourself."
-  log_info "(Changing datacenter later means re-running --setup, since the network volume is locked to it.)"
+  log_info "(Changing datacenter later means re-running --setup, since the network volume is locked to it."
+  log_info " --setup --norotate keeps your existing keys and volume as long as you pick the same datacenter again.)"
   log_info ""
   local dc_choice
   select_from_menu "Choose a datacenter" dc_choice "${dc_labels[@]}" || return 1
@@ -232,6 +252,13 @@ setup_datacenter() {
 setup_network_volume() {
   log_info ""
   log_info "== Step 4: Network volume (persistent model-weights storage) =="
+
+  if [[ "$NOROTATE" == 1 && -n "$OLD_NETWORK_VOLUME_ID" && "$DATACENTER_ID" == "$OLD_DATACENTER_ID" ]]; then
+    NETWORK_VOLUME_ID="$OLD_NETWORK_VOLUME_ID"
+    log_ok "Keeping existing network volume $NETWORK_VOLUME_ID (--norotate, same datacenter $DATACENTER_ID)."
+    return 0
+  fi
+
   log_info "Sizing guide: 60GB for 4-bit weights, 100GB for 8-bit or a" \
            "single fp16 model, 150-200GB to keep both presets or an fp16 +" \
            "quantized copy side by side. See PREREQUISITES.md for the table."
@@ -327,6 +354,20 @@ run_setup_wizard() {
   install_runpodctl
   command -v openssl >/dev/null 2>&1 || die "openssl not found on PATH - needed to generate a fresh vLLM API key on every launch (see create_pod() in lib/launch.sh). Install it via your distro's package manager; this repo doesn't auto-install it (it's a near-universal base-system tool, unlike the release binary above)."
   command -v secret-tool >/dev/null 2>&1 || die "secret-tool not found on PATH - needed to store the RunPod API key in the OS keyring instead of a plaintext file (see load_secrets() in lib/common.sh). Install it via your distro's package manager (libsecret-tools on Debian/Ubuntu, libsecret on Fedora/Arch) and make sure a Secret Service (GNOME Keyring or KWallet) is running and unlocked in this session, then re-run."
+
+  # For --norotate: read the PRIOR datacenter/volume out of the config file
+  # being about to be overwritten, before any wizard step runs, so
+  # setup_network_volume() can tell whether the datacenter picked this run
+  # is the same one the existing volume is locked to. Sourced in a subshell
+  # so it doesn't leak DATACENTER_ID/NETWORK_VOLUME_ID into this function
+  # early - each step still sets those the normal way.
+  local OLD_DATACENTER_ID="" OLD_NETWORK_VOLUME_ID=""
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck source=/dev/null
+    OLD_DATACENTER_ID="$(source "$CONFIG_FILE" 2>/dev/null; printf '%s' "${DATACENTER_ID:-}")"
+    # shellcheck source=/dev/null
+    OLD_NETWORK_VOLUME_ID="$(source "$CONFIG_FILE" 2>/dev/null; printf '%s' "${NETWORK_VOLUME_ID:-}")"
+  fi
 
   # Steps 2-4 run as a back-able sequence: any step can return 1 (e.g. the
   # user typed the safeword on its first prompt) to hand control to the

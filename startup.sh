@@ -26,6 +26,7 @@ source "$SCRIPT_DIR/lib/prewarm.sh"
 
 SETUP=0
 ROTATE=0
+NOROTATE=0
 NEW_SESSION=0
 PREWARM=0
 IDLE_MINUTES=20
@@ -37,9 +38,16 @@ DEBUG=0
 
 usage() {
   cat <<EOF
-Usage: $0 [--setup] [--rotate] [--new] [--prewarm] [--idle-minutes N] [--max-runtime-hours N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
+Usage: $0 [--setup] [--norotate] [--rotate] [--new] [--prewarm] [--idle-minutes N] [--max-runtime-hours N] [--storage-mode MODE] [--no-logging] [--debug|--debug-quiet]
 
   --setup                 Force the first-run setup wizard, even if config exists.
+  --norotate               With --setup: keep the existing RunPod API key and HF
+                           token from the OS keyring instead of re-pasting them, and
+                           keep the existing network volume instead of creating a new
+                           one, as long as the datacenter you pick is the same one
+                           already on file. Picking a different datacenter still
+                           creates a new volume (the old one is locked to the old
+                           datacenter). Has no effect without --setup.
   --rotate                Re-paste the RunPod API key, without redoing the rest of
                            setup. The vLLM API key and SSH keypair are generated fresh
                            on every launch already - nothing to rotate for either.
@@ -94,6 +102,7 @@ EOF
 while (( $# > 0 )); do
   case "$1" in
     --setup) SETUP=1 ;;
+    --norotate) NOROTATE=1 ;;
     --rotate) ROTATE=1 ;;
     --new) NEW_SESSION=1 ;;
     --prewarm) PREWARM=1 ;;
@@ -114,8 +123,9 @@ done
 [[ "$MAX_RUNTIME_HOURS" =~ ^[0-9]+$ ]] || die "--max-runtime-hours needs a number."
 [[ "$STORAGE_MODE" == "network-volume" || "$STORAGE_MODE" == "container-disk" ]] \
   || die "--storage-mode must be 'network-volume' or 'container-disk', got '$STORAGE_MODE'."
-export STORAGE_MODE PREWARM USER_EXTRA_ARGS
+export STORAGE_MODE PREWARM USER_EXTRA_ARGS NOROTATE
 [[ "$DEBUG" == 1 ]] && enable_debug_logging startup "$DEBUG_MODE"
+[[ "$NOROTATE" == 1 && "$SETUP" != 1 ]] && log_warn "--norotate has no effect without --setup."
 
 if [[ ! -f "$CONFIG_FILE" || "$SETUP" == 1 ]]; then
   run_setup_wizard
