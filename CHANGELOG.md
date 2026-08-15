@@ -4,6 +4,11 @@
 
 ### Unreleased
 
+## [2.5.0] - 2026-08-15
+
+### Added
+- `--norotate` flag, a modifier for `--setup` (`startup.sh`, `lib/wizard.sh`): keeps the existing RunPod API key and HF token from the OS keyring instead of re-pasting them, and keeps the existing network volume instead of creating a new (billed) one, as long as the datacenter picked this run matches the one already on file. Picking a different datacenter still creates a new volume, since a volume is locked to its datacenter. Has no effect without `--setup`. Default `--setup` behavior (no `--norotate`) is unchanged - still re-prompts for both credentials and always creates a fresh volume.
+
 ## [2.4.3] - 2026-08-15
 
 ### Fixed
