@@ -4,6 +4,10 @@
 
 ### Unreleased
 
+### Fixed
+- v2.7.0's `--jinja` fix for Deckard's tool-call formatting was incomplete: `--jinja` turned out to already be the default in `ghcr.io/ggml-org/llama.cpp:server-cuda` (confirmed live via `llama-server --help`), so it changed nothing. The actual cause: Deckard's own `chat_template.jinja` (fetched from its HF repo) renders tool calls in a bespoke `<tool_call><function=NAME><parameter=NAME>value</parameter></function></tool_call>` XML shape that isn't one of llama.cpp's natively-parsed tool-call formats (Llama 3.1-3.3, Functionary v3.1/3.2, Hermes 2/3, Qwen2.5(-Coder), Mistral Nemo, FireFunction v2, Command R7B, DeepSeek R1 - `docs/function-calling.md`), so it fell back to llama.cpp's "generic" tool-call parser. Both deckard-gguf preset rows now also pass `--chat-template-file` pointing at `templates/qwen3-tool-call-chat-template.jinja` (a verbatim copy of `Qwen/Qwen3-32B`'s official template, which uses the standard Hermes-style JSON `<tool_call>{"name":...,"arguments":{...}}</tool_call>` format) to override just the prompt-formatting/output-parsing layer - Deckard's weights and quant are untouched. Verified locally with a real small model (`Qwen/Qwen2.5-0.5B-Instruct-GGUF`) through the exact same `llama-server --chat-template-file --jinja` combination: a tool-calling request now comes back with `finish_reason: "tool_calls"` and a correctly structured `tool_calls` array, not raw text.
+- New `maybe_upload_chat_template()` (`lib/prewarm.sh`), called from both `run_normal_launch()` and `e2e-test.sh`: before a launch whose preset's `MODEL_EXTRA_ARGS` references `--chat-template-file /workspace/persistent/...`, uploads the matching file from `templates/` onto the network volume via a throwaway CPU pod (same shape as the existing weights-prewarm path) if it isn't already there. Needed because a fresh or recreated network volume won't have the override file, and llama-server fails to start (not silently falls back) if `--chat-template-file`'s path doesn't exist.
+
 ## [2.7.0] - 2026-08-15
 
 ### Added

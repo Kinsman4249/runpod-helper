@@ -190,6 +190,10 @@ fi
 
 if [[ "$STORAGE_MODE" == "network-volume" ]]; then
   ensure_network_volume
+  # Same correctness requirement as run_normal_launch() (lib/launch.sh) -
+  # see maybe_upload_chat_template()'s comment in lib/prewarm.sh. A no-op
+  # unless $PRESET_NAME's MODEL_EXTRA_ARGS references --chat-template-file.
+  maybe_upload_chat_template
 fi
 
 PASS=1

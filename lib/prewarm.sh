@@ -68,6 +68,14 @@ PREWARM_LLAMACPP_IMAGE="ghcr.io/ggml-org/llama.cpp:server"
 # real launch's own download still works either way.
 PREWARM_RECORD_FILE="$CONFIG_DIR/prewarmed"
 
+# Same local-only, best-effort tracking as PREWARM_RECORD_FILE above, but for
+# small override files (currently just the Deckard tool-call chat template)
+# that a preset's --docker-args points --chat-template-file at on the
+# network volume. Keyed the same way (volume_id, then the file's remote
+# path) so a recreated volume or a cleared cache correctly loses the record
+# and gets a fresh upload before the next launch of that preset.
+CHAT_TEMPLATE_RECORD_FILE="$CONFIG_DIR/chat-templates-uploaded"
+
 is_marked_prewarmed() {
   local volume_id="$1" repo="$2"
   [[ -f "$PREWARM_RECORD_FILE" ]] && grep -qF -- "$volume_id	$repo" "$PREWARM_RECORD_FILE"
@@ -225,4 +233,151 @@ PYEOF
   else
     die "Prewarm pod $prewarm_pod_id never became ready within the wait window - it has already been torn down. Check https://www.runpod.io/console/pods for its recent logs if the console still has them, or rerun --prewarm."
   fi
+}
+
+# --- chat-template override upload ------------------------------------------
+
+is_chat_template_uploaded() {
+  local volume_id="$1" remote_path="$2"
+  [[ -f "$CHAT_TEMPLATE_RECORD_FILE" ]] && grep -qF -- "$volume_id	$remote_path" "$CHAT_TEMPLATE_RECORD_FILE"
+}
+
+mark_chat_template_uploaded() {
+  local volume_id="$1" remote_path="$2"
+  is_chat_template_uploaded "$volume_id" "$remote_path" && return
+  mkdir -p "$CONFIG_DIR"
+  printf '%s\t%s\n' "$volume_id" "$remote_path" >> "$CHAT_TEMPLATE_RECORD_FILE"
+}
+
+# Writes $local_path's contents to $remote_path on the network volume, via
+# the same "throwaway CPU pod + HTTP-200-when-done" shape as run_prewarm()
+# above (a RunPod pod never reaches EXITED just because its own process
+# exits - see that function's design-constraint comment - so a plain health
+# port is the only reliable "done" signal available here too). Reuses
+# PREWARM_PY_IMAGE (python:3.12-slim) rather than adding a third throwaway
+# image: python's stdlib http.server + base64 modules are enough, no engine
+# binary is involved for a plain file write. base64, not printf %q, carries
+# the file into the pod's own /bin/sh (dash) command for the same reason
+# run_prewarm()'s vLLM branch does: %q's $'...' ANSI-C quoting is not
+# something dash understands - confirmed live 2026-08-14 for that case, not
+# re-proven here, but the risk is identical since both paths go through the
+# same --docker-args -> dash pipeline.
+upload_chat_template_to_volume() {
+  local local_path="$1" remote_path="$2"
+  [[ -f "$local_path" ]] || die "upload_chat_template_to_volume: $local_path does not exist locally."
+
+  local file_b64
+  file_b64="$(base64 -w0 "$local_path")"
+
+  local py_script py_b64 inner_cmd
+  py_script=$(cat <<'PYEOF'
+import http.server, os, base64, pathlib, threading
+
+status = {"code": 503, "msg": b"writing chat template"}
+
+def write_file():
+    try:
+        target = pathlib.Path(os.environ["TARGET_PATH"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(base64.b64decode(os.environ["FILE_B64"]))
+        status["code"] = 200
+        status["msg"] = b"chat template written"
+    except Exception as exc:
+        status["code"] = 500
+        status["msg"] = f"failed: {exc}".encode()
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(status["code"])
+        self.end_headers()
+        self.wfile.write(status["msg"])
+    def log_message(self, *args):
+        pass
+
+threading.Thread(target=write_file, daemon=True).start()
+http.server.HTTPServer(("0.0.0.0", 8000), Handler).serve_forever()
+PYEOF
+)
+  py_b64="$(printf '%s' "$py_script" | base64 -w0)"
+  inner_cmd="echo $py_b64 | base64 -d | python3 -"
+  local docker_args
+  docker_args="$(printf '%q ' sh -c "$inner_cmd")"
+  local env_json
+  env_json=$(jq -n --arg target "$remote_path" --arg fileb64 "$file_b64" \
+    '{TARGET_PATH:$target, FILE_B64:$fileb64}')
+
+  local api_key terminate_after
+  api_key="$(openssl rand -hex 32)"
+  terminate_after="$(date -u -d "+${PREWARM_TERMINATE_AFTER_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)"
+
+  log_info ""
+  log_info "Uploading $(basename "$local_path") to $remote_path on network volume $NETWORK_VOLUME_ID via a throwaway CPU pod..."
+  local create_output
+  create_output="$(runpodctl_t pod create \
+    --compute-type CPU \
+    --cloud-type SECURE \
+    --image "$PREWARM_PY_IMAGE" \
+    --network-volume-id "$NETWORK_VOLUME_ID" \
+    --volume-mount-path /workspace/persistent \
+    --container-disk-in-gb "$PREWARM_CONTAINER_DISK_GB" \
+    --terminate-after "$terminate_after" \
+    --name "runpod-lab-template-upload-$(date +%s)" \
+    --ports "8000/http" \
+    --env "$env_json" \
+    --docker-args "$docker_args")" || die "Chat-template upload pod creation failed. Raw output:\n$create_output"
+
+  local upload_pod_id
+  upload_pod_id="$(jq -r '.id // empty' <<< "$create_output")"
+  [[ -n "$upload_pod_id" ]] || die "Chat-template upload pod created but no id found in the response: $create_output"
+  log_ok "Upload pod created: $upload_pod_id"
+
+  # Same save/restore-globals dance as run_prewarm() - wait_for_pod_ready/
+  # wait_for_vllm_ready (lib/launch.sh) read POD_ID/API_HOSTNAME/VLLM_API_KEY,
+  # and this call must not clobber the real launch's own values.
+  local saved_pod_id="${POD_ID:-}" saved_hostname="${API_HOSTNAME:-}" saved_key="${VLLM_API_KEY:-}"
+  POD_ID="$upload_pod_id"
+  API_HOSTNAME="$upload_pod_id-8000.proxy.runpod.net"
+  VLLM_API_KEY="$api_key"
+
+  wait_for_pod_ready
+  wait_for_vllm_ready || true
+  local upload_ok=0
+  curl -fsS --max-time 5 -o /dev/null "https://$API_HOSTNAME/" 2>/dev/null && upload_ok=1
+
+  log_info "Tearing down upload pod $upload_pod_id..."
+  runpodctl_t pod stop "$upload_pod_id" >/dev/null 2>&1 || true
+  runpodctl_t pod delete "$upload_pod_id" >/dev/null 2>&1 || true
+
+  POD_ID="$saved_pod_id"; API_HOSTNAME="$saved_hostname"; VLLM_API_KEY="$saved_key"
+
+  if (( upload_ok == 1 )); then
+    mark_chat_template_uploaded "$NETWORK_VOLUME_ID" "$remote_path"
+    log_ok "Chat template uploaded to $remote_path on $NETWORK_VOLUME_ID."
+  else
+    die "Chat-template upload pod $upload_pod_id never became ready within the wait window - it has already been torn down. Check https://www.runpod.io/console/pods for its recent logs, or rerun the launch (it will retry the upload since nothing was marked uploaded)."
+  fi
+}
+
+# Scans MODEL_EXTRA_ARGS for a --chat-template-file pointing at the network
+# volume mount (/workspace/persistent/...) and, if that exact (volume,
+# remote path) pair hasn't been uploaded before, pushes the matching local
+# file from templates/ (same basename) up via upload_chat_template_to_volume()
+# above. A no-op for presets that don't use --chat-template-file at all, and
+# for STORAGE_MODE=container-disk (nothing persists there to upload to, and
+# no preset in PRESET_TABLE currently pairs --chat-template-file with
+# container-disk anyway). Must run after pick_preset_and_gpu (needs
+# MODEL_EXTRA_ARGS) and after ensure_network_volume (needs NETWORK_VOLUME_ID).
+maybe_upload_chat_template() {
+  [[ "$STORAGE_MODE" == "network-volume" ]] || return 0
+  [[ "${MODEL_EXTRA_ARGS:-}" == *"--chat-template-file /workspace/persistent/"* ]] || return 0
+
+  local remote_path
+  remote_path="$(grep -oE -- '--chat-template-file [^ ]+' <<< "$MODEL_EXTRA_ARGS" | awk '{print $2}')"
+  [[ -n "$remote_path" ]] || return 0
+
+  is_chat_template_uploaded "$NETWORK_VOLUME_ID" "$remote_path" && return 0
+
+  local local_path
+  local_path="$SCRIPT_DIR/templates/$(basename "$remote_path")"
+  upload_chat_template_to_volume "$local_path" "$remote_path"
 }
