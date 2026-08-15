@@ -211,6 +211,10 @@ succeed, since the bare vLLM image has no sshd at all. Registered with
 your RunPod account and revoked again once the pod is torn down (see
 `cleanup_ephemeral_ssh_key()` and `e2e-test.sh`'s own `cleanup()` trap).
 
+See `GOTCHAS.md` for non-obvious RunPod/dependency behavior confirmed live
+while building this (SSH-over-proxy's real address format, CPU pod sizing,
+quantization pitfalls, and more).
+
 ## License
 
 GPLv3 - see [LICENSE](LICENSE).

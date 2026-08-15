@@ -155,7 +155,10 @@ cleanup_ephemeral_ssh_key() {
 
 # Resolves $POD_ID's SSH-over-proxy target (sets SSH_PROXY_HOST to
 # "<pod-id>-<hash>") for diagnostics: `ssh -i $SSH_KEY_PATH
-# root@$SSH_PROXY_HOST.ssh.runpod.io`. This is NOT direct-TCP SSH
+# $SSH_PROXY_HOST@ssh.runpod.io` - the pod-host-id is the USERNAME, against
+# a single shared hostname, not "<pod-host-id>.ssh.runpod.io" as a
+# subdomain (that form does not resolve at all - confirmed live 2026-08-15,
+# see GOTCHAS.md). This is NOT direct-TCP SSH
 # (resolve_pod_ssh_endpoint() used to do that, removed 2026-08-14 along
 # with the custom image - the bare vllm/vllm-openai image never starts an
 # sshd, so 22/tcp is never listening for RunPod to map). RunPod's proxy

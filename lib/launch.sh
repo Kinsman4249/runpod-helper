@@ -94,7 +94,8 @@ qwen2.5-72b|vllm|Qwen/Qwen2.5-72B-Instruct-AWQ|qwen2.5-72b|48|8192|auto|-|Qwen2.
 llama3.3-70b|vllm|casperhansen/llama-3.3-70b-instruct-awq|llama3.3-70b|48|8192|auto|-|Llama-3.3-70B-Instruct (AWQ, ~39GB) - non-Qwen/DeepSeek alternative in range
 qwen3.5-40b-deckard|vllm|DavidAU/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking|qwen3.5-40b-deckard|80|262144|fp8|--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager|Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking (hybrid Gated DeltaNet/full-attention, bf16 repo, on-the-fly FP8 ~40GB weights, 256K context, needs an 80GB+ card - see CHANGELOG.md) - uncensored, tuned for tool use
 qwen3.6-27b-awq-mtp|vllm|shawnw3i/Qwen3.6-27B-AWQ-MTP|qwen3.6-27b|24|16384|awq|--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager|Qwen3.6-27B-AWQ-MTP (hybrid Gated DeltaNet/full-attention, AWQ ~18GB weights, verified live 2026-08-14 on a 24GB L4) - agentic coding, MTP speculative decode support
-qwen3.5-40b-deckard-gguf|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|48|262144|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0|Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking on llama.cpp (static GGUF, Q5_K_S ~27GB - the model cards own stated minimum for reliable tool calls, see mradermacher/...-GGUF; Q4 is smaller but the card explicitly warns against it for agentic/tool-call use), 256K context - min_vram is a first guess (hybrid arch needs far less KV cache than the dense vLLM path above at the same context, not yet measured live), bump if it OOMs
+qwen3.5-40b-deckard-gguf|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|48|262144|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0|Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking on llama.cpp (static GGUF, Q5_K_S ~27GB - the model cards own stated minimum for reliable tool calls, see mradermacher/...-GGUF; Q4 is smaller but the card explicitly warns against it for agentic/tool-call use), 256K context - min_vram computed from config.json (96 layers, only 24 full_attention per full_attention_interval=4, the other 72 linear_attention/GDN with fixed-size state independent of context length): full-attention KV cache at q8_0/262144 tokens/4 KV heads/256 head_dim/24 layers is ~13GB, GDN state across 72 layers is a constant ~0.2GB regardless of context, plus ~25GB Q5_K_S weights and llama.cpp compute-buffer overhead totals ~41GB - 48 is the cheapest tier that clears it with headroom, confirmed live 2026-08-15 (e2e: 114s pod-create to ready, GET /v1/models passed)
+qwen3.5-40b-deckard-gguf-40gb|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|40|196608|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0|Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking on llama.cpp, same weights as the row above but for a 40GB-floor card that cannot fit the model native 262144 max (config.json: max_position_embeddings 262144, no rope_scaling - that is a hard ceiling, not a chosen default) - same KV-cache formula as above, 40GB only has ~12GB left over weights/GDN/compute-buffer overhead, which caps full-attention KV cache at ~196608 tokens (192K) with headroom; not yet confirmed live - budget/reduced-context option, prefer the 48-floor row above whenever a 48GB+ card is actually in stock since it gets the full 256K for the same or lower live price more often than not
 '
 
 # --- GPU listing --------------------------------------------------------
@@ -534,7 +535,14 @@ wait_for_vllm_ready() {
     fi
     sleep 15; waited=$((waited + 15))
   done
-  log_warn "${ENGINE:-vllm} endpoint didn't respond within ${max_wait}s - it may still be loading, or something failed. Check the RunPod console (pod > Logs), or 'ssh -i $SSH_KEY_PATH root@\$SSH_PROXY_HOST.ssh.runpod.io' (resolve_pod_ssh_proxy_host() in lib/common.sh; requires a real terminal/PTY, see its comment - not scriptable)."
+  log_warn "${ENGINE:-vllm} endpoint didn't respond within ${max_wait}s - it may still be loading, or something failed. Check the RunPod console (pod > Logs), or 'ssh -i $SSH_KEY_PATH \$SSH_PROXY_HOST@ssh.runpod.io' (resolve_pod_ssh_proxy_host() in lib/common.sh; requires a real terminal/PTY, see its comment - not scriptable)."
+  # Callers historically didn't check this - both existing call sites (below,
+  # and lib/prewarm.sh's run_prewarm) treat a timeout as a warning rather
+  # than a hard failure. The explicit 1 here is additive: it lets a new
+  # caller distinguish "actually served" from "gave up waiting" (see
+  # mark_prewarmed's use below) without changing behavior for callers that
+  # still ignore the status.
+  return 1
 }
 
 # Launches idle-watchdog.sh (repo root) detached on THIS machine - see that
@@ -565,11 +573,32 @@ run_normal_launch() {
   fi
   pick_preset_and_gpu
 
+  # Offer a cheap-CPU-pod prewarm before paying real GPU-hourly rates for the
+  # download, but only when we don't already have a local record that this
+  # preset's weights landed on this volume before (either via a prior
+  # prewarm or a prior real launch - see mark_prewarmed() below) - see
+  # lib/prewarm.sh's is_marked_prewarmed()/mark_prewarmed(). Skipped
+  # entirely on container-disk (nothing persists there to check) and when
+  # --prewarm was already passed explicitly (about to run unconditionally
+  # below either way).
+  if [[ "$STORAGE_MODE" == "network-volume" && "${PREWARM:-0}" != 1 ]] \
+      && ! is_marked_prewarmed "$NETWORK_VOLUME_ID" "$MODEL_REPO"; then
+    confirm "No local record that $MODEL_REPO is cached on network volume $NETWORK_VOLUME_ID yet - downloading it during the real launch bills GPU-hourly rates for the download time. Prewarm it first via a cheap CPU pod instead?" \
+      && PREWARM=1
+  fi
+
   [[ "${PREWARM:-0}" == 1 ]] && run_prewarm
 
   create_pod
   wait_for_pod_ready
-  wait_for_vllm_ready
+  # || true: a timeout here is a warning, not a fatal error (see
+  # wait_for_vllm_ready's own comment) - under set -e a bare failing call
+  # would otherwise abort the script instead of printing the pod-ready
+  # summary below. Its exit status still gates mark_prewarmed right after,
+  # so a genuine timeout correctly skips recording this as cached.
+  if wait_for_vllm_ready; then
+    [[ "$STORAGE_MODE" == "network-volume" ]] && mark_prewarmed "$NETWORK_VOLUME_ID" "$MODEL_REPO"
+  fi
   maybe_start_idle_watchdog
 
   # Best-effort - a failure here doesn't affect the endpoint at all, only
@@ -582,7 +611,7 @@ run_normal_launch() {
   log_info "Model name for clients: $SERVED_MODEL_NAME"
   log_info "API key (Authorization: Bearer <key> - one-off, generated for this pod, shown once, not stored anywhere): $VLLM_API_KEY"
   if [[ -n "${SSH_PROXY_HOST:-}" ]]; then
-    log_info "Diagnostics: ssh -i $SSH_KEY_PATH root@$SSH_PROXY_HOST.ssh.runpod.io"
+    log_info "Diagnostics: ssh -i $SSH_KEY_PATH $SSH_PROXY_HOST@ssh.runpod.io"
     log_info "  (proxy SSH, not direct-TCP - the bare vllm-openai image has no sshd. Requires a real terminal; needs a PTY. Key is registered with your RunPod account for this pod only - 'runpodctl ssh remove-key --fingerprint $SSH_KEY_FINGERPRINT' revokes it sooner if you want that.)"
   fi
   log_info "Pod ID: $POD_ID   Model: $MODEL_REPO   Quantization: ${MODEL_QUANTIZATION:-auto}   Context: $MAX_MODEL_LEN   Idle limit: ${IDLE_MINUTES}m   Max runtime: ${MAX_RUNTIME_HOURS}h"

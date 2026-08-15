@@ -219,7 +219,12 @@ launch_started="$(date +%s)"
 create_pod
 POD_CREATED=1
 wait_for_pod_ready
-wait_for_vllm_ready
+# || true: wait_for_vllm_ready now returns 1 on timeout (added in
+# lib/launch.sh for run_normal_launch's mark_prewarmed gating) - under set -e
+# a bare failing call would abort before the checks below ever ran, instead
+# of letting them run and report a clear PASS/FAIL against a stalled
+# endpoint the way this script always has.
+wait_for_vllm_ready || true
 launch_elapsed=$(( $(date +%s) - launch_started ))
 log_info ""
 log_info "Timing (storage-mode=$STORAGE_MODE, preset=$PRESET_NAME): ${launch_elapsed}s from pod-create to vLLM-ready."

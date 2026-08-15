@@ -56,6 +56,30 @@ PREWARM_PY_IMAGE="python:3.12-slim"
 # risks writing a cache layout llama-server itself doesn't recognize.
 PREWARM_LLAMACPP_IMAGE="ghcr.io/ggml-org/llama.cpp:server"
 
+# --- prewarm tracking ---------------------------------------------------
+# Local-only record of which (network volume, model repo) pairs this machine
+# has already warmed - either via a prior --prewarm run or a prior real
+# launch that itself downloaded the weights (both leave the same cache on
+# the volume). Lets run_normal_launch() (lib/launch.sh) offer to prewarm only
+# the first time a given preset touches a given volume, instead of asking on
+# every single launch. Best-effort: it's a convenience prompt, not a source
+# of truth - if the volume was recreated or the cache was cleared out from
+# under this file, the worst case is just an unnecessary offer, and the
+# real launch's own download still works either way.
+PREWARM_RECORD_FILE="$CONFIG_DIR/prewarmed"
+
+is_marked_prewarmed() {
+  local volume_id="$1" repo="$2"
+  [[ -f "$PREWARM_RECORD_FILE" ]] && grep -qF -- "$volume_id	$repo" "$PREWARM_RECORD_FILE"
+}
+
+mark_prewarmed() {
+  local volume_id="$1" repo="$2"
+  is_marked_prewarmed "$volume_id" "$repo" && return
+  mkdir -p "$CONFIG_DIR"
+  printf '%s\t%s\n' "$volume_id" "$repo" >> "$PREWARM_RECORD_FILE"
+}
+
 # Downloads $MODEL_REPO onto the network volume via a throwaway CPU pod, then
 # tears it down - all before any GPU pod (billed at the real preset's hourly
 # rate) gets created. Must run AFTER preset resolution (needs ENGINE,
@@ -177,10 +201,14 @@ PYEOF
   VLLM_API_KEY="$api_key"
 
   wait_for_pod_ready
-  wait_for_vllm_ready
-  # wait_for_vllm_ready() only warns on timeout, it doesn't signal failure to
-  # its caller (see lib/launch.sh) - so success here is judged by one more
-  # direct check, not by that function's own (always-0) return status.
+  # || true: wait_for_vllm_ready now returns 1 on timeout (added for
+  # run_normal_launch's mark_prewarmed gating) - under set -e a bare failing
+  # call here would abort the script instead of falling through to the
+  # direct curl check below, which is what actually judges success here.
+  wait_for_vllm_ready || true
+  # Success here is judged by one more direct check, not by
+  # wait_for_vllm_ready's own return status - keeps this path's stricter
+  # short-timeout behavior (5s here vs its 1800s wait loop) unchanged.
   local prewarm_ok=0
   curl -fsS --max-time 5 -o /dev/null -H "Authorization: Bearer $api_key" "https://$API_HOSTNAME/v1/models" 2>/dev/null \
     && prewarm_ok=1
@@ -192,6 +220,7 @@ PYEOF
   POD_ID="$saved_pod_id"; API_HOSTNAME="$saved_hostname"; VLLM_API_KEY="$saved_key"
 
   if (( prewarm_ok == 1 )); then
+    mark_prewarmed "$NETWORK_VOLUME_ID" "$MODEL_REPO"
     log_ok "Prewarm done - $MODEL_REPO is cached on $NETWORK_VOLUME_ID. The next launch of this preset will skip the download."
   else
     die "Prewarm pod $prewarm_pod_id never became ready within the wait window - it has already been torn down. Check https://www.runpod.io/console/pods for its recent logs if the console still has them, or rerun --prewarm."
