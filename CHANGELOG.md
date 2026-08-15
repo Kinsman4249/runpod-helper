@@ -4,6 +4,14 @@
 
 ### Unreleased
 
+## [2.4.1] - 2026-08-15
+
+### Added
+- Launch script now outputs a fully-populated OpenCode provider configuration (ready to paste into ~/.config/opencode/opencode.json), eliminating manual substitution of the one-off baseURL and API key. Configuration schema verified against opencode.ai/config.json.
+
+### Changed
+- GOTCHAS.md expanded with three new documented behaviors: `runpodctl pod create` writes errors to stderr (not stdout), critical for capacity-error detection; datacenter `.location` field is generic "Europe" for most EU datacenters (read the id's country-code token instead); and clarification on how the new stderr capture enables the capacity-failure retry logic.
+
 ## [2.4.0] - 2026-08-15
 
 ### Added
