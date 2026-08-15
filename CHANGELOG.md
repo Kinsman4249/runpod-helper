@@ -4,10 +4,18 @@
 
 ### Unreleased
 
+## [2.7.0] - 2026-08-15
+
 ### Added
 - New `cleanup-ssh-keys.sh` script: finds and removes orphaned `runpod-lab-ephemeral-*` SSH keys left in the RunPod account by launches whose `cleanup_ephemeral_ssh_key()` teardown never ran (crash, kill, Ctrl-C before the trap fires). Matches only this repo's ephemeral-key naming pattern, lists age before touching anything, supports `--dry-run`, `--older-than-hours N`, `--yes`, and the usual `--debug`/`--debug-quiet`. Confirmed live: found and removed 16 real orphaned keys (ages 40m-19h) from a real account.
 - `sync-runpod-endpoint.sh` now syncs a third target: DeepSeek Harness's `settings.yaml` (`$DSH_HOME/settings.yaml`, `~/.dsh/settings.yaml` when unset). Unlike Kilo Code's and opencode's shared JSON shape, this is YAML and only supports `apiKeyEnv` (a credential reference, never a literal key), so it needed its own write path: a `yq`-based block (new host dependency alongside `jq`, degrades to a warning and skips this target rather than aborting the sync if `yq` isn't installed) that patches `llm-pi-ai.providers.runpod-helper` and `agent-default-model`, plus an `export RUNPOD_HELPER_API_KEY=...` line kept in sync in `~/.bashrc` under `CONTAINER_HOME` (the key itself has nowhere to live in the YAML). `models` is a YAML array rather than the JSON configs' keyed dict, so switching between launch presets appends the new model id instead of replacing the list, deduplicated against re-syncing the same model. Verified live end-to-end: a real RunPod-served model answered a `dsh --profile headless` prompt through this exact config.
-- Fixed the `--help` output being silently truncated mid-`Usage` list - it sliced the header comment by a hardcoded line range (`sed -n '2,49p'`) that had gone stale as the comment block grew. Now extracts everything between the shebang and `set -euo pipefail` instead, so it can't rot the same way again.
+
+### Changed
+- GOTCHAS.md documents that Kilo Code needs a full restart (VSCodium window reload or extension quit/relaunch) to pick up a re-synced `kilo.jsonc`, while opencode does not: Kilo caches the provider's API key and config in its own sqlite store (`~/.local/share/kilo/kilo.db`, `credential` table) at session start rather than re-reading the file per request. Confirmed live 2026-08-15 - a running Kilo session kept 404ing against an already-torn-down pod's proxy hostname after `sync-runpod-endpoint.sh` had already rewritten the file with the new one.
+
+### Fixed
+- `sync-runpod-endpoint.sh --help` no longer truncates mid-Usage list. It previously sliced the header comment by a hardcoded line range (`sed -n '2,49p'`) that had gone stale as the comment block grew; it now extracts everything between the shebang and `set -euo pipefail` instead, so it can't rot the same way again.
+- Both `qwen3.5-40b-deckard-gguf` preset rows (48GB and 40GB variants) in `lib/launch.sh` now pass `--jinja` to llama-server. Without it, llama-server ignored the GGUF's embedded chat template and fell back to its own minimal built-in formatting, which does not render tool definitions into the prompt at all. Deckard's template is inherited from its Qwen3.5 base and already knows Qwen's `<tool_call>` syntax, so `--jinja` makes llama-server actually use it instead of overriding it into something schema-less.
 
 ## [2.6.0] - 2026-08-15
 
