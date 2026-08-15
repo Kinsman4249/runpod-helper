@@ -4,6 +4,9 @@
 
 ### Unreleased
 
+### Added
+- New `cleanup-ssh-keys.sh` script: finds and removes orphaned `runpod-lab-ephemeral-*` SSH keys left in the RunPod account by launches whose `cleanup_ephemeral_ssh_key()` teardown never ran (crash, kill, Ctrl-C before the trap fires). Matches only this repo's ephemeral-key naming pattern, lists age before touching anything, supports `--dry-run`, `--older-than-hours N`, `--yes`, and the usual `--debug`/`--debug-quiet`. Confirmed live: found and removed 16 real orphaned keys (ages 40m-19h) from a real account.
+
 ## [2.6.0] - 2026-08-15
 
 ### Added

@@ -363,7 +363,12 @@ diagnostics-only SSH-over-proxy path (`resolve_pod_ssh_proxy_host()`) -
 it's not needed for anything in the normal launch or test flow to
 succeed, since the bare vLLM image has no sshd at all. Registered with
 your RunPod account and revoked again once the pod is torn down (see
-`cleanup_ephemeral_ssh_key()` and `e2e-test.sh`'s own `cleanup()` trap).
+`cleanup_ephemeral_ssh_key()` and `e2e-test.sh`'s own `cleanup()` trap). That
+teardown is best-effort - a crash, a kill, or Ctrl-C before the trap runs
+leaves the key registered - so run `./cleanup-ssh-keys.sh` occasionally to
+sweep up any that got left behind. It only ever touches keys matching this
+repo's `runpod-lab-ephemeral-*` naming pattern; `./cleanup-ssh-keys.sh --help`
+has the full flag list.
 
 See `GOTCHAS.md` for non-obvious RunPod/dependency behavior confirmed live
 while building this (SSH-over-proxy's real address format, CPU pod sizing,
