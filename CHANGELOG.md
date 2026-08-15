@@ -4,6 +4,12 @@
 
 ### Unreleased
 
+## [2.3.0] - 2026-08-15
+
+### Added
+- Capacity-failure fallback on pod create: RunPod can reject a `pod create` with a graphql "This machine does not have the resources to deploy your pod. Please try a different machine" error even when `runpodctl gpu list` shows that GPU in stock (stock is datacenter-wide; a specific host can still be full). `create_pod()` (`lib/launch.sh`) now captures runpodctl's stderr (where that JSON error actually lands - previously the `die` message's "Raw output:" was blank because it only had stdout), classifies capacity/placement errors as retryable, and returns a distinct status instead of dying. `startup.sh` then offers the other cards currently meeting the model's VRAM floor (`offer_alternate_gpu()`) to retry with; `e2e-test.sh` auto-advances cheapest-first through every candidate card. The model's VRAM floor is now saved to `~/.runpod-lab/last-session` (`MIN_VRAM`) so a reused session can still re-list correctly.
+- `--extra-args "ARGS"` (`startup.sh` and `e2e-test.sh`): appends arbitrary flags verbatim to the engine's serve command (`vllm serve` or `llama-server`), for a model/quant needing a knob the script doesn't expose (e.g. vLLM `--rope-scaling`, llama.cpp `--split-mode`). Applied after the preset's own `MODEL_EXTRA_ARGS` so a user value wins on last-one-wins flags; space-separated (a single flag value can't contain spaces); not applied to the prewarm pod.
+
 ## [2.2.0] - 2026-08-15
 
 ### Added
