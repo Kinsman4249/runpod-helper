@@ -108,12 +108,81 @@ setup_datacenter() {
 
   [[ -n "$menu_rows" ]] || die "No datacenter data returned - check https://www.runpod.io/console/gpu-cloud instead."
 
-  local -a dc_ids=() dc_labels=()
-  while IFS=$'\t' read -r id location gpus; do
-    dc_ids+=("$id")
-    dc_labels+=("$(printf '%-10s %-15s %s' "$id" "$location" "${gpus:-no stock}")")
-  done <<< "$menu_rows"
+  # Five/Nine/Fourteen Eyes intelligence-sharing alliances, keyed by ISO 3166
+  # country code (en.wikipedia.org/wiki/Five_Eyes: 5 = US/UK/CA/AU/NZ; 9 adds
+  # DK/FR/NL/NO; 14 adds DE/BE/IT/ES/SE). A code absent here counts as outside
+  # all three - the privacy-preferred group.
+  local -A eyes_tier=(
+    [US]=5 [GB]=5 [CA]=5 [AU]=5 [NZ]=5
+    [DK]=9 [FR]=9 [NL]=9 [NO]=9
+    [DE]=14 [BE]=14 [IT]=14 [ES]=14 [SE]=14
+  )
+  # RunPod's `.location` is a specific country for some datacenters but the
+  # generic "Europe" for most EU ones (confirmed live 2026-08-15). Map the
+  # specific names to a code here; "Europe" and anything unmapped fall through
+  # to the id's own country-code token below. Doing location-first matters:
+  # US-DE-1's location is "United States", so it classifies as US (5) rather
+  # than mis-reading the "DE" (Delaware, not Germany) token in its id.
+  local -A loc_code=(
+    ["United States"]=US ["Canada"]=CA ["Australia"]=AU ["New Zealand"]=NZ
+    ["United Kingdom"]=GB ["France"]=FR ["Germany"]=DE ["Netherlands"]=NL
+    ["Norway"]=NO ["Denmark"]=DK ["Sweden"]=SE ["Belgium"]=BE ["Italy"]=IT
+    ["Spain"]=ES ["India"]=IN ["Japan"]=JP ["Singapore"]=SG ["SE Asia"]=SG
+  )
+  # Code -> country name, only for display when the location came back as the
+  # generic "Europe" (so the menu shows "Romania", not "Europe").
+  local -A cc_name=(
+    [CZ]=Czechia [DK]=Denmark [NL]=Netherlands [IS]=Iceland [NO]=Norway
+    [RO]=Romania [SE]=Sweden [FR]=France [DE]=Germany [BE]=Belgium [IT]=Italy
+    [ES]=Spain [PL]=Poland [FI]=Finland [CH]=Switzerland [AT]=Austria
+  )
 
+  # Build "<rank>\t<id>\t<location>\t<code>\t<tier>\t<gpus>" rows, then sort
+  # rank ascending so outside-Eyes (rank 0) lands first, 14/9/5 after.
+  local sortable="" id location gpus code tier rank
+  while IFS=$'\t' read -r id location gpus; do
+    [[ -z "$id" ]] && continue
+    code="${loc_code[$location]:-}"
+    # Generic/unmapped location -> the id's 2nd '-'-separated field is the
+    # country code (EU-RO-1 -> RO, EUR-IS-1 -> IS); only reached when the
+    # location itself didn't already resolve a code, so US states can't leak in.
+    [[ -z "$code" ]] && code="$(cut -d- -f2 <<< "$id")"
+    tier="${eyes_tier[$code]:-}"
+    case "$tier" in
+      "")  rank=0 ;;
+      14)  rank=1 ;;
+      9)   rank=2 ;;
+      5)   rank=3 ;;
+    esac
+    sortable+="$rank"$'\t'"$id"$'\t'"$location"$'\t'"$code"$'\t'"$tier"$'\t'"$gpus"$'\n'
+  done <<< "$menu_rows"
+  sortable="$(printf '%s' "$sortable" | sort -t$'\t' -k1,1n -k2,2 -s)"
+
+  local -a dc_ids=() dc_labels=()
+  local rank_out cname loc_disp tag
+  while IFS=$'\t' read -r rank_out id location code tier gpus; do
+    [[ -z "$id" ]] && continue
+    cname="${cc_name[$code]:-}"
+    # Prefer a resolved country name over a bare "Europe".
+    if [[ "$location" == "Europe" && -n "$cname" ]]; then loc_disp="$cname"; else loc_disp="$location"; fi
+    case "$tier" in
+      "")  tag="${COLOR_GREEN}[outside 5/9/14 Eyes - recommended]${COLOR_RESET}" ;;
+      14)  tag="[14 Eyes]" ;;
+      9)   tag="[9 Eyes]" ;;
+      5)   tag="[5 Eyes]" ;;
+    esac
+    dc_ids+=("$id")
+    # tag carries color escapes, so it goes last (unwidthed) - a fixed-width
+    # column would count the invisible bytes and misalign every highlighted row.
+    dc_labels+=("$(printf '%-10s %-14s %s  ' "$id" "$loc_disp" "${gpus:-no stock}")$tag")
+  done <<< "$sortable"
+
+  log_info ""
+  log_info "Datacenters grouped by intelligence-sharing alliance (en.wikipedia.org/wiki/Five_Eyes):"
+  log_info "those OUTSIDE the 5/9/14 Eyes are listed first (privacy-preferred, shown in green); Eyes"
+  log_info "members follow but are all still selectable - pick whichever you want. The grouping is"
+  log_info "best-effort from each datacenter's id/location; confirm the real jurisdiction yourself."
+  log_info "(Changing datacenter later means re-running --setup, since the network volume is locked to it.)"
   log_info ""
   local dc_choice
   select_from_menu "Choose a datacenter" dc_choice "${dc_labels[@]}" || return 1

@@ -22,6 +22,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=lib/launch.sh
 source "$SCRIPT_DIR/lib/launch.sh"
+# shellcheck source=lib/gguf.sh
+source "$SCRIPT_DIR/lib/gguf.sh"
+# shellcheck source=lib/select.sh
+source "$SCRIPT_DIR/lib/select.sh"
 # shellcheck source=lib/prewarm.sh
 source "$SCRIPT_DIR/lib/prewarm.sh"
 

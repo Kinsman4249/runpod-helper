@@ -39,8 +39,10 @@ beyond the model-weights cache and a one-off SSH key per pod.
   Qwen2.5-72B-Instruct, Llama-3.3-70B-Instruct,
   Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking (and a
   GGUF build of it in two context sizes), and Qwen3.6-27B-AWQ-MTP - plus
-  a `custom` option to paste any Hugging Face repo id, with a prompt to
-  grow the network volume if it needs more room than the presets assume.
+  a `custom` option to paste any Hugging Face repo id (served with vLLM),
+  and a `custom-gguf` option to paste any Hugging Face GGUF repo and pick
+  a quant from what it publishes (sizes pulled live, served with
+  llama.cpp), each with a prompt to grow the network volume if needed.
   See `lib/launch.sh`'s `PRESET_TABLE` for the exact repos, engines,
   quantization methods, extra serve flags (some hybrid-attention models
   need `--gpu-memory-utilization`/`--kv-cache-dtype` tuning beyond the
@@ -112,8 +114,11 @@ been re-run against this rewrite yet - see CHANGELOG.md.
 
 First run: `./startup.sh` detects there's no local config yet and walks
 you through a one-time setup wizard - installing the local tools it
-needs, taking your RunPod API key, and creating the model-weights
-volume. That's it; nothing to configure outside RunPod's own dashboard.
+needs, taking your RunPod API key, picking a datacenter, and creating the
+model-weights volume. That's it; nothing to configure outside RunPod's
+own dashboard. The datacenter menu groups locations by the Five/Nine/
+Fourteen Eyes intelligence-sharing alliances, listing those outside all
+three first (privacy-preferred) while leaving every one selectable.
 
 Every run after that: GPU tier and model are picked once and silently
 reused from then on (`--new` to change them), and everything else - the
@@ -144,11 +149,14 @@ and launches. `./startup.sh --help` prints this same list.
 
 ### Choosing what runs (interactive, shown on first launch or `--new`)
 
-1. **Model** - pick one of the nine built-in presets, or `custom` to
-   paste any Hugging Face repo id (served with vLLM) and the served name
-   to expose it as. A custom repo has no known weight size, so the GPU
-   list isn't VRAM-filtered for it and you're prompted for the network
-   volume size yourself.
+1. **Model** - pick one of the nine built-in presets (each label shows
+   its VRAM floor and whether that floor is tested-live or a conservative
+   estimate), `custom` to paste any Hugging Face repo id (served with
+   vLLM), or `custom-gguf` to paste any Hugging Face GGUF repo and pick a
+   quant from what it publishes - the quant list and sizes are pulled live
+   and served with llama.cpp, and the volume is auto-sized to the quant. A
+   plain `custom` repo has no known weight size, so its GPU list isn't
+   VRAM-filtered and you set the volume size yourself.
 2. **GPU** - live list of cards currently stocked in your datacenter that
    meet the model's VRAM floor, cheapest first. If `pod create` later
    fails because that specific host is full, you're re-offered the other
