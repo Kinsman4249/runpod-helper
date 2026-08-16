@@ -2,7 +2,15 @@
 
 ## Change history
 
-### Unreleased
+## [Unreleased]
+
+## [2.8.0] - 2026-08-16
+
+### Added
+- Two new non-thinking Deckard/Eleanor llamacpp presets in `lib/launch.sh`: `qwen3.6-40b-deckard-eleanor-gguf` (48GB/256K ctx) and `qwen3.6-40b-deckard-eleanor-gguf-40gb` (40GB/192K ctx), both serving `DavidAU/Qwen3.6-40B-Fable-Fusion-6-Core-Deckard-Eleanor-Heretic-Uncensored-NM-DAU-NEO-MAX-MTP-GGUF:Q5_K_S` (~27GB). Qwen3.6 does not officially support the `/think` `/nothink` soft-switch that Qwen3.5 has - whether the model "thinks" is baked into its weights, not a runtime flag - so these rows point at a separately-built non-thinking model rather than toggling the existing thinking Qwen3.5-Deckard GGUF. Same GDN/full-attention flag shape (`-fa on --cache-type-k q8_0 --cache-type-v q8_0 --jinja`) as the existing deckard-gguf rows. The Eleanor GGUF's embedded chat template was confirmed (via the HF API, 2026-08-16) to use the same bespoke Deckard XML `<tool_call><function=...>` shape, not Qwen's standard Hermes-style JSON, so the rows also carry the `--chat-template-file` override of `templates/qwen3-tool-call-chat-template.jinja`, uploaded to the volume via the existing `maybe_upload_chat_template()` path.
+
+### Removed
+- Five untested `PRESET_TABLE` rows dropped from `lib/launch.sh` (and their `PREREQUISITES.md` rows): `deepseek-r1-distill-32b`, `qwen3-32b`, `qwen2.5-72b`, `llama3.3-70b`, and `qwen3.5-40b-deckard` (the vLLM on-the-fly-FP8 80GB-floor row). Kept the two tested vLLM presets (`qwen3-coder-30b-moe`, `qwen3.6-27b-awq-mtp`) and the two thinking deckard-gguf llamacpp rows. `CONTAINER_DISK_GB_STANDALONE` value is unchanged at 150 but its comment no longer cites `qwen3.5-40b-deckard`'s ~80GB bf16 download as the largest preset; a reduction is a possible follow-up.
 
 ## [2.7.1] - 2026-08-15
 
