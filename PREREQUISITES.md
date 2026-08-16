@@ -75,13 +75,12 @@ overhead); see `lib/launch.sh`'s `PRESET_TABLE` for the exact HF repos.
 
 | Preset | Approx. weights | Min GPU (VRAM) | Suggested volume |
 |---|---|---|---|
-| `deepseek-r1-distill-32b` | ~19GB | 24GB (RTX 4090) | 60GB |
-| `qwen3-32b` | ~19GB | 24GB (RTX 4090) | 60GB |
 | `qwen3-coder-30b-moe` | ~17GB | 24GB (RTX 4090) | 60GB |
-| `qwen2.5-72b` | ~41GB | 48GB (A6000/L40S) | 100GB |
-| `llama3.3-70b` | ~39GB | 48GB (A6000/L40S) | 100GB |
-| `qwen3.5-40b-deckard` | ~40GB (bf16 repo, quantized to FP8 on the fly - no separate quant repo to size for) | 80GB (A100 80GB/H100) | 100GB |
 | `qwen3.6-27b-awq-mtp` | ~18GB | 24GB (RTX 4090/L4) | 60GB |
+| `qwen3.5-40b-deckard-gguf` | ~27GB (Q5_K_S GGUF) | 48GB (A6000/L40S) | 100GB |
+| `qwen3.5-40b-deckard-gguf-40gb` | ~27GB (Q5_K_S GGUF) | 40GB (A40/L4) | 100GB |
+| `qwen3.6-40b-deckard-eleanor-gguf` | ~27GB (Q5_K_S GGUF) | 48GB (A6000/L40S) | 100GB |
+| `qwen3.6-40b-deckard-eleanor-gguf-40gb` | ~27GB (Q5_K_S GGUF) | 40GB (A40/L4) | 100GB |
 | Several presets cached side by side | - | - | 150-200GB |
 | `custom` (any HF repo) | depends on the model | you decide | the launch wizard prompts to grow the volume if needed (RunPod only allows growing, never shrinking, and it's a billed, permanent change) |
 

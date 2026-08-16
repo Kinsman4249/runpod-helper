@@ -2,6 +2,7 @@
 handoff.md
 todo.md
 .claude/
+.kilo/
 
 # Project-specific: never let a secret land in this repo by accident.
 # The local config file and any GitHub App key should live outside the
@@ -14,4 +15,3 @@ todo.md
 last-session
 runpod-lab.config
 *.log
-.kilo/kilo.jsonc

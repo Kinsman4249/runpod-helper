@@ -15,12 +15,13 @@ CONTAINER_DISK_GB=40   # holds the vLLM image + OS only; weights live on the
 # mkdir -p's a normal directory instead of a mounted volume). Sized
 # generously since container disk is billed per-second only while the pod is
 # running (free once stopped) - the real cost driver for this mode is GB
-# rather than time. The largest current preset needing headroom is
-# qwen3.5-40b-deckard: it downloads the full bf16 checkpoint (~80GB, roughly
-# double its ~40GB post-quantization VRAM footprint) since vLLM's
-# --quantization fp8 quantizes on the fly at load time rather than
-# downloading a pre-quantized repo - not yet measured against a real pull,
-# bump this if it turns out too small.
+# rather than time. The largest current preset needing headroom is the
+# ~27GB Q5_K_S GGUF of the two deckard/Eleanor llamacpp presets (weights on
+# the volume, plus a few GB for the llama.cpp CPU image and OS) - well under
+# this 150GB cap. 150 is intentionally left over-sized for safety rather
+# than shrunk to match, since container-disk is only billed while the pod
+# runs; a reduction is a possible follow-up if this mode is actually used
+# and disk space starts to matter.
 CONTAINER_DISK_GB_STANDALONE=150
 
 # "network-volume" (default): current behavior, model weights persist on a
@@ -104,13 +105,25 @@ LLAMACPP_IMAGE_NAME="ghcr.io/ggml-org/llama.cpp:server-cuda"
 #     The -40gb row is the same weights capped at 196608 tokens (192K) to fit a
 #     40GB card - 262144 is the model hard max_position_embeddings (no rope
 #     scaling), so a smaller card buys less context, not a bigger model.
-#   - Both deckard-gguf rows carry --jinja and --chat-template-file. --jinja
+#   - qwen3.6-40b-deckard-eleanor[-gguf|-gguf-40gb] are the non-thinking
+#     siblings of the two thinking deckard-gguf rows above, added 2026-08-16
+#     for Qwen3.6 (Eleanor's base). Qwen3.5 supports a /think /nothink
+#     soft-switch, but Qwen3.6 does NOT officially - whether it "thinks" is
+#     baked into the model weights, not a runtime flag - so a separate
+#     non-thinking model (DavidAU's Eleanor) is required, and these rows
+#     serve exactly that. Same GDN/full-attention architecture, same ~27GB
+#     Q5_K_S weights, same 48/40GB floor derivation and flag shape as the
+#     thinking rows above.
+#   - The deckard-gguf and Eleanor rows all carry --jinja and --chat-template-file.
+#     --jinja
 #     is a no-op against the current ghcr.io/ggml-org/llama.cpp:server-cuda
 #     build (jinja is already its default - confirmed live 2026-08-15 via
 #     `llama-server --help`) but kept as a defensive pin in case a future
 #     image flips that default back. --chat-template-file is the real fix:
 #     Deckard's own embedded chat_template.jinja (fetched from its HF repo
-#     and inspected 2026-08-15) renders tool calls as a bespoke
+#     and inspected 2026-08-15 - the Eleanor GGUF's embedded template was
+#     confirmed identical 2026-08-16 via the HF API) renders tool calls as a
+#     bespoke
 #     "<tool_call><function=NAME><parameter=NAME>value</parameter></function>
 #     </tool_call>" XML shape, not Qwen's standard Hermes-style
 #     '<tool_call>{"name":...,"arguments":{...}}</tool_call>' JSON. llama.cpp
@@ -123,22 +136,20 @@ LLAMACPP_IMAGE_NAME="ghcr.io/ggml-org/llama.cpp:server-cuda"
 #     kilo's tool-call parsing. templates/qwen3-tool-call-chat-template.jinja
 #     is a verbatim copy of Qwen/Qwen3-32B's official template (confirmed to
 #     use the standard JSON tool_call format llama.cpp recognizes natively)
-#     - it overrides Deckard's own template for formatting/parsing purposes
+#     - it overrides Deckard's/Eleanor's own template for formatting/parsing
+#     purposes
 #     only, the weights and quant are untouched. Must be uploaded once to
 #     each network volume this preset runs against (see
 #     upload_chat_template_to_volume() below) before --chat-template-file's
 #     path resolves on the pod - a fresh volume without it present makes
 #     llama-server fail to start, not silently fall back.
 PRESET_TABLE='
-deepseek-r1-distill-32b|vllm|casperhansen/deepseek-r1-distill-qwen-32b-awq|deepseek-r1-32b|24|16384|auto|-|DeepSeek-R1-Distill-Qwen-32B (AWQ ~19GB) - 24GB VRAM floor (napkin math) - dense reasoning
-qwen3-32b|vllm|Qwen/Qwen3-32B-AWQ|qwen3-32b|24|16384|auto|-|Qwen3-32B (AWQ ~19GB) - 24GB VRAM floor (napkin math) - dense general-purpose
 qwen3-coder-30b-moe|vllm|stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ|qwen3-coder-30b|24|32768|compressed-tensors|-|Qwen3-Coder-30B-A3B MoE (AWQ ~17GB) - 24GB VRAM floor (tested live) - coding
-qwen2.5-72b|vllm|Qwen/Qwen2.5-72B-Instruct-AWQ|qwen2.5-72b|48|8192|auto|-|Qwen2.5-72B-Instruct (AWQ ~41GB) - 48GB VRAM floor (napkin math) - bigger dense
-llama3.3-70b|vllm|casperhansen/llama-3.3-70b-instruct-awq|llama3.3-70b|48|8192|auto|-|Llama-3.3-70B-Instruct (AWQ ~39GB) - 48GB VRAM floor (napkin math) - non-Qwen option
-qwen3.5-40b-deckard|vllm|DavidAU/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking|qwen3.5-40b-deckard|80|262144|fp8|--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager|Qwen3.5-40B-Deckard (FP8 ~40GB, 256K ctx) - 80GB VRAM floor (napkin math) - uncensored, tool use
 qwen3.6-27b-awq-mtp|vllm|shawnw3i/Qwen3.6-27B-AWQ-MTP|qwen3.6-27b|24|16384|awq|--gpu-memory-utilization 0.95 --kv-cache-dtype fp8 --enforce-eager|Qwen3.6-27B-AWQ-MTP (AWQ ~18GB) - 24GB VRAM floor (tested live) - agentic coding
 qwen3.5-40b-deckard-gguf|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|48|262144|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0 --jinja --chat-template-file /workspace/persistent/chat-templates/qwen3-tool-call-chat-template.jinja|Qwen3.5-40B-Deckard GGUF Q5_K_S (~27GB, 256K ctx, llama.cpp) - 48GB VRAM floor (tested live) - uncensored, tool use
 qwen3.5-40b-deckard-gguf-40gb|llamacpp|mradermacher/Qwen3.5-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-GGUF:Q5_K_S|qwen3.5-40b-deckard|40|196608|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0 --jinja --chat-template-file /workspace/persistent/chat-templates/qwen3-tool-call-chat-template.jinja|Qwen3.5-40B-Deckard GGUF Q5_K_S (~27GB, 192K ctx, llama.cpp) - 40GB VRAM floor (napkin math) - budget/reduced context
+qwen3.6-40b-deckard-eleanor-gguf|llamacpp|DavidAU/Qwen3.6-40B-Fable-Fusion-6-Core-Deckard-Eleanor-Heretic-Uncensored-NM-DAU-NEO-MAX-MTP-GGUF:Q5_K_S|qwen3.6-40b-deckard-eleanor|48|262144|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0 --jinja --chat-template-file /workspace/persistent/chat-templates/qwen3-tool-call-chat-template.jinja|Qwen3.6-40B Fable-Fusion-Eleanor GGUF Q5_K_S (~27GB, 256K ctx, llama.cpp) - 48GB VRAM floor (napkin math) - non-thinking, uncensored, tool use
+qwen3.6-40b-deckard-eleanor-gguf-40gb|llamacpp|DavidAU/Qwen3.6-40B-Fable-Fusion-6-Core-Deckard-Eleanor-Heretic-Uncensored-NM-DAU-NEO-MAX-MTP-GGUF:Q5_K_S|qwen3.6-40b-deckard-eleanor|40|196608|-|-fa on --cache-type-k q8_0 --cache-type-v q8_0 --jinja --chat-template-file /workspace/persistent/chat-templates/qwen3-tool-call-chat-template.jinja|Qwen3.6-40B Fable-Fusion-Eleanor GGUF Q5_K_S (~27GB, 192K ctx, llama.cpp) - 40GB VRAM floor (napkin math) - non-thinking, budget/reduced context
 '
 
 # --- GPU listing --------------------------------------------------------
